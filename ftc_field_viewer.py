@@ -110,11 +110,11 @@ class FieldView(QtWidgets.QGraphicsView):
 
     def __init__(self, scene, image_pixmap, *args, **kwargs):
         super().__init__(scene, *args, **kwargs)
-        self.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        self.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
-        self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
-        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        self.setDragMode(QtWidgets.QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
         self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
         self.scene().addItem(self.image_item)
@@ -208,7 +208,7 @@ class FieldView(QtWidgets.QGraphicsView):
         # Origin marker
         r = 6
         origin_marker = self.scene().addEllipse(origin_scene.x()-r/2, origin_scene.y()-r/2, r, r,
-                                                QtGui.QPen(QtCore.Qt.NoPen),
+                                                QtGui.QPen(QtCore.Qt.PenStyle.NoPen),
                                                 QtGui.QBrush(QtGui.QColor("#00ffd0")))
         origin_label = self.scene().addText("(0,0)")
         origin_label.setDefaultTextColor(QtGui.QColor("#8fbcd4"))
@@ -228,7 +228,7 @@ class FieldView(QtWidgets.QGraphicsView):
             self.point_items.append(ellipse)
 
             if self.show_labels:
-                label = self.scene().addText(p["name'])
+                label = self.scene().addText(p["name"])
                 label.setDefaultTextColor(color.lighter(150))
                 label.setPos(pos + QtCore.QPointF(10, -18))
                 label.setZValue(5)
@@ -249,7 +249,7 @@ class FieldView(QtWidgets.QGraphicsView):
 
     def mousePressEvent(self, event: QtGui.QMouseEvent):
         scene_pos = self.mapToScene(event.position().toPoint())
-        if event.button() == QtCore.Qt.LeftButton:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
             # Check selection on points (nearest within radius)
             nearest_idx = -1
             nearest_dist2 = 12*12
@@ -350,7 +350,7 @@ class ControlPanel(QtWidgets.QWidget):
         grid_group = QtWidgets.QGroupBox("Grid")
         gg = QtWidgets.QGridLayout(grid_group)
         gg.addWidget(QtWidgets.QLabel("Spacing (in):"), 0, 0)
-        self.slider_spacing = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_spacing = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.slider_spacing.setRange(1, 24)
         self.slider_spacing.setValue(1)
         gg.addWidget(self.slider_spacing, 0, 1)
@@ -358,7 +358,7 @@ class ControlPanel(QtWidgets.QWidget):
         gg.addWidget(self.lbl_spacing_val, 0, 2)
 
         gg.addWidget(QtWidgets.QLabel("Opacity:"), 1, 0)
-        self.slider_opacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_opacity = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.slider_opacity.setRange(5, 100)
         self.slider_opacity.setValue(50)
         gg.addWidget(self.slider_opacity, 1, 1)
@@ -560,8 +560,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.panel = ControlPanel(self.view)
         dock = QtWidgets.QDockWidget("Controls", self)
         dock.setWidget(self.panel)
-        dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
-        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
         # Window styling
         self.setWindowTitle("FTC Field Map Viewer – DECODE")
@@ -603,7 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reset_view(self):
         self.view.resetTransform()
-        self.view.fitInView(self.view.image_rect, QtCore.Qt.KeepAspectRatio)
+        self.view.fitInView(self.view.image_rect, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
 
     def _open_image(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Field Image", "", "Images (*.png *.jpg *.jpeg)")
