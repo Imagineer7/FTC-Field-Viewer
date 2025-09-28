@@ -3,6 +3,8 @@
 # See usage instructions at the bottom.
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect
+from PySide6.QtWidgets import QGraphicsEffect
 import json
 import os
 import sys
@@ -15,6 +17,90 @@ DEFAULT_POINTS = [
     {"name": "Red Goal (ID 24)", "x": -58.3727, "y": 55.6425, "color": "#ff4d4d"},
     {"name": "Blue Goal (ID 20)", "x": -58.3727, "y": -55.6425, "color": "#4da6ff"},
 ]
+
+class PointCreationDialog(QtWidgets.QDialog):
+    """Dialog for creating new points with name, color, and coordinate input"""
+    
+    def __init__(self, x, y, parent=None):
+        super().__init__(parent)
+        self.x = x
+        self.y = y
+        self.setWindowTitle("Create New Point")
+        self.setModal(True)
+        self.resize(350, 200)
+        
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Coordinates display (read-only)
+        coord_group = QtWidgets.QGroupBox("Position")
+        coord_layout = QtWidgets.QHBoxLayout(coord_group)
+        coord_label = QtWidgets.QLabel(f"X: {x:.1f} in,  Y: {y:.1f} in")
+        coord_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+        coord_layout.addWidget(coord_label)
+        layout.addWidget(coord_group)
+        
+        # Point name input
+        name_group = QtWidgets.QGroupBox("Point Name")
+        name_layout = QtWidgets.QVBoxLayout(name_group)
+        self.name_input = QtWidgets.QLineEdit()
+        self.name_input.setPlaceholderText("Enter point name...")
+        self.name_input.setText("New Point")
+        self.name_input.selectAll()
+        name_layout.addWidget(self.name_input)
+        layout.addWidget(name_group)
+        
+        # Color selection
+        color_group = QtWidgets.QGroupBox("Point Color")
+        color_layout = QtWidgets.QHBoxLayout(color_group)
+        
+        # Color preview button
+        self.color_button = QtWidgets.QPushButton()
+        self.color_button.setFixedSize(40, 30)
+        self.selected_color = QtGui.QColor("#ffd166")  # Default yellow
+        self.color_button.setStyleSheet(f"background-color: {self.selected_color.name()}; border: 2px solid #333;")
+        self.color_button.clicked.connect(self._choose_color)
+        
+        # Color label
+        color_label = QtWidgets.QLabel("Click to change color")
+        color_layout.addWidget(self.color_button)
+        color_layout.addWidget(color_label)
+        color_layout.addStretch()
+        layout.addWidget(color_group)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        
+        create_button = QtWidgets.QPushButton("Create Point")
+        create_button.setDefault(True)
+        create_button.clicked.connect(self.accept)
+        
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(create_button)
+        layout.addLayout(button_layout)
+        
+        # Focus on name input
+        self.name_input.setFocus()
+    
+    def _choose_color(self):
+        """Open color picker dialog"""
+        color = QtWidgets.QColorDialog.getColor(self.selected_color, self, "Choose Point Color")
+        if color.isValid():
+            self.selected_color = color
+            self.color_button.setStyleSheet(f"background-color: {color.name()}; border: 2px solid #333;")
+    
+    def get_point_data(self):
+        """Return the point data from the dialog"""
+        return {
+            "name": self.name_input.text().strip() or "New Point",
+            "x": self.x,
+            "y": self.y,
+            "color": self.selected_color.name()
+        }
 
 DARK_QSS = """
 QWidget {
@@ -104,9 +190,12 @@ QStatusBar {
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
+
+
 class FieldView(QtWidgets.QGraphicsView):
     cursorMoved = QtCore.Signal(float, float)  # emits field coords (x,y) inches
     pointSelected = QtCore.Signal(int)        # emits index in points list or -1
+    pointAdded = QtCore.Signal()              # emits when a new point is created
 
     def __init__(self, scene, image_pixmap, *args, **kwargs):
         super().__init__(scene, *args, **kwargs)
@@ -119,7 +208,6 @@ class FieldView(QtWidgets.QGraphicsView):
         self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
         self.scene().addItem(self.image_item)
 
-        self.grid_spacing_in = 1  # inches per grid line
         self.grid_opacity = 0.5
         self.grid_pen = QtGui.QPen(QtGui.QColor(0, 188, 255, int(255*self.grid_opacity)), 0.0)
         self.major_grid_every = 6  # bold every N lines
@@ -131,6 +219,11 @@ class FieldView(QtWidgets.QGraphicsView):
         self.selected_index = -1
         self.show_labels = True
 
+        # Cursor-following snap point
+        self.cursor_point = None
+        self.cursor_field_pos = (0, 0)  # Current snapped position in field coordinates
+        self.menu_open = False  # Track if context menu is open
+        
         self.image_rect = self.image_item.boundingRect()
         self.setSceneRect(self.image_rect)
         self.setBackgroundBrush(QtGui.QColor("#0b0f14"))
@@ -146,14 +239,45 @@ class FieldView(QtWidgets.QGraphicsView):
         sy = (HALF_FIELD - y_in) * (ih / FIELD_SIZE_IN)
         return QtCore.QPointF(self.image_rect.left() + sx, self.image_rect.top() + sy)
 
-    def scene_to_field(self, p: QtCore.QPointF):
+    def scene_to_field(self, scene_pos):
+        """Convert scene coordinates to field coordinates (inches)"""
         iw = self.image_rect.width()
         ih = self.image_rect.height()
-        sx = p.x() - self.image_rect.left()
-        sy = p.y() - self.image_rect.top()
+        left = self.image_rect.left()
+        top = self.image_rect.top()
+        sx = scene_pos.x() - left
+        sy = scene_pos.y() - top
         x_in = (sx * FIELD_SIZE_IN / iw) - HALF_FIELD
         y_in = HALF_FIELD - (sy * FIELD_SIZE_IN / ih)
         return x_in, y_in
+    
+    def snap_to_grid(self, x_in, y_in, resolution=1.0):
+        """Snap field coordinates to specified resolution grid"""
+        snapped_x = round(x_in / resolution) * resolution
+        snapped_y = round(y_in / resolution) * resolution
+        return snapped_x, snapped_y
+    
+    def _get_current_grid_spacing(self):
+        """Get the current grid spacing in inches based on zoom level"""
+        # Get current zoom level from transform
+        current_transform = self.transform()
+        zoom_level = current_transform.m11()  # horizontal scale factor
+        
+        # Calculate dynamic spacing - same logic as _draw_grid
+        base_spacing = 23.5  # inches at full zoom out (actual FTC tile size)
+        
+        if zoom_level <= 1.0:
+            return base_spacing
+        elif zoom_level <= 2.0:
+            return base_spacing / 2  # 11.75 inches
+        elif zoom_level <= 4.0:
+            return base_spacing / 4  # 5.875 inches
+        elif zoom_level <= 8.0:
+            return base_spacing / 8  # 2.9375 inches
+        elif zoom_level <= 16.0:
+            return base_spacing / 16  # 1.46875 inches
+        else:
+            return 1.0  # 1 inch for very high zoom
 
     # --- Grid and points drawing ---
     def _clear_overlays(self):
@@ -167,6 +291,7 @@ class FieldView(QtWidgets.QGraphicsView):
         self._clear_overlays()
         self._draw_grid()
         self._draw_points()
+        self._draw_cursor_point()
 
     def _draw_grid(self):
         iw = self.image_rect.width()
@@ -174,26 +299,68 @@ class FieldView(QtWidgets.QGraphicsView):
         left = self.image_rect.left()
         top = self.image_rect.top()
 
-        # number of grid lines across the 141 in field
-        step_in = clamp(self.grid_spacing_in, 1, 24)
-        num_lines = int(FIELD_SIZE_IN / step_in)
-
-        # pixel step
-        px_step_x = (iw / FIELD_SIZE_IN) * step_in
-        px_step_y = (ih / FIELD_SIZE_IN) * step_in
-
+        # Get current zoom level from transform
+        current_transform = self.transform()
+        zoom_level = current_transform.m11()  # horizontal scale factor
+        
+        # Calculate appropriate grid spacing based on zoom
+        # At zoom=1.0 (full zoom out), use 23.5-inch tiles (actual FTC field tile size)
+        # As zoom increases, subdivide to smaller grids
+        base_spacing = 23.5  # inches at full zoom out (actual FTC tile size)
+        
+        # Calculate dynamic spacing - subdivide as we zoom in
+        if zoom_level <= 1.0:
+            step_in = base_spacing
+        elif zoom_level <= 2.0:
+            step_in = base_spacing / 2  # 11.75 inches
+        elif zoom_level <= 4.0:
+            step_in = base_spacing / 4  # 5.875 inches
+        elif zoom_level <= 8.0:
+            step_in = base_spacing / 8  # 2.9375 inches
+        elif zoom_level <= 16.0:
+            step_in = base_spacing / 16  # 1.46875 inches
+        else:
+            step_in = 1.0  # 1 inch for very high zoom
+        
+        # Calculate grid lines needed to cover the field plus some margin
+        margin_factor = 1.5  # Extra grid lines beyond field edges
+        total_coverage = FIELD_SIZE_IN * margin_factor
+        num_lines = int(total_coverage / step_in)
+        
+        # Calculate pixel step - use the smaller scale to ensure square grid cells
+        # This makes the grid always display as squares regardless of image aspect ratio
+        scale_x = iw / FIELD_SIZE_IN
+        scale_y = ih / FIELD_SIZE_IN
+        # Use the smaller scale to ensure grid stays within image bounds
+        grid_scale = min(scale_x, scale_y)
+        px_step = grid_scale * step_in  # Same step size for both X and Y
+        
+        # Center grid on field center (image center)
+        center_x = left + iw / 2
+        center_y = top + ih / 2
+        
+        # Calculate starting positions to center the grid
+        half_lines = num_lines // 2
+        start_x = center_x - half_lines * px_step
+        start_y = center_y - half_lines * px_step
+        
         # Draw vertical lines
         for i in range(num_lines + 1):
-            x = left + i * px_step_x
+            x = start_x + i * px_step
             line = QtCore.QLineF(x, top, x, top + ih)
-            pen = self.major_grid_pen if (i % self.major_grid_every == 0) else self.grid_pen
+            # Make every nth line major for 23.5-inch spacing intervals
+            major_every = max(1, int(23.5 / step_in))
+            is_major = (i - half_lines) % major_every == 0
+            pen = self.major_grid_pen if is_major else self.grid_pen
             self.scene().addLine(line, pen)
-
+        
         # Draw horizontal lines
         for i in range(num_lines + 1):
-            y = top + i * px_step_y
+            y = start_y + i * px_step
             line = QtCore.QLineF(left, y, left + iw, y)
-            pen = self.major_grid_pen if (i % self.major_grid_every == 0) else self.grid_pen
+            major_every = max(1, int(23.5 / step_in))
+            is_major = (i - half_lines) % major_every == 0
+            pen = self.major_grid_pen if is_major else self.grid_pen
             self.scene().addLine(line, pen)
 
         # Axes lines through origin
@@ -215,64 +382,174 @@ class FieldView(QtWidgets.QGraphicsView):
         origin_label.setPos(origin_scene + QtCore.QPointF(8, -18))
 
     def _draw_points(self):
+        # Clear existing point items from scene
+        for item in self.point_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
         self.point_items.clear()
+        
         for idx, p in enumerate(self.points):
             color = QtGui.QColor(p.get("color", "#ffd166"))
             pos = self.field_to_scene(p["x"], p["y"])
-            r = 10.0 if idx == self.selected_index else 8.0
+            r = 12.0 if idx == self.selected_index else 10.0
+            
+            # Create simple point circle
             pen = QtGui.QPen(QtGui.QColor("#000000"))
-            pen.setWidthF(1.0)
-            ellipse = self.scene().addEllipse(pos.x()-r/2, pos.y()-r/2, r, r, pen, QtGui.QBrush(color))
-            ellipse.setZValue(5)
-            ellipse.setData(0, idx)  # store index
-            self.point_items.append(ellipse)
+            pen.setWidthF(2.0 if idx == self.selected_index else 1.0)
+            brush = QtGui.QBrush(color)
+            
+            point = self.scene().addEllipse(
+                pos.x() - r/2, pos.y() - r/2, r, r, pen, brush
+            )
+            point.setZValue(5)
+            self.point_items.append(point)
 
             if self.show_labels:
+                # Create text label with background
                 label = self.scene().addText(p["name"])
+                
+                # Set larger, bold font
+                font = QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold)
+                label.setFont(font)
                 label.setDefaultTextColor(color.lighter(150))
-                label.setPos(pos + QtCore.QPointF(10, -18))
-                label.setZValue(5)
+                label.setPos(pos + QtCore.QPointF(15, -25))
+                label.setZValue(6)
+                
+                # Create background rectangle
+                text_rect = label.boundingRect()
+                padding = 4
+                bg_rect = text_rect.adjusted(-padding, -padding, padding, padding)
+                
+                # Position background relative to label
+                bg_pos = label.pos()
+                background = self.scene().addRect(
+                    bg_rect.translated(bg_pos),
+                    QtGui.QPen(color.darker(120)),
+                    QtGui.QBrush(QtGui.QColor(0, 0, 0, 180))  # Semi-transparent black
+                )
+                background.setZValue(5)  # Behind text but above points
+                
+                self.point_items.append(background)
                 self.point_items.append(label)
+    
+    def _draw_cursor_point(self):
+        """Draw the cursor-following snap point"""
+        if self.cursor_point and self.cursor_point.scene() == self.scene():
+            self.scene().removeItem(self.cursor_point)
+            self.cursor_point = None
+        
+        # Create a semi-transparent cursor point
+        scene_pos = self.field_to_scene(*self.cursor_field_pos)
+        cursor_color = QtGui.QColor(255, 255, 255, 150)  # Semi-transparent white
+        cursor_pen = QtGui.QPen(QtGui.QColor(0, 0, 0, 200))
+        cursor_pen.setWidthF(2.0)
+        
+        self.cursor_point = self.scene().addEllipse(
+            scene_pos.x() - 6, scene_pos.y() - 6, 12, 12,
+            cursor_pen, QtGui.QBrush(cursor_color)
+        )
+        self.cursor_point.setZValue(10)  # Above other points
 
     # --- Interaction ---
     def wheelEvent(self, event: QtGui.QWheelEvent):
         zoom_in_factor = 1.15
         zoom_out_factor = 1 / zoom_in_factor
-        zoom = zoom_in_factor if event.angleDelta().y() > 0 else zoom_out_factor
-        self.scale(zoom, zoom)
+        
+        # Get current zoom level
+        current_zoom = self.transform().m11()
+        
+        # Calculate proposed new zoom level
+        proposed_zoom = current_zoom * (zoom_in_factor if event.angleDelta().y() > 0 else zoom_out_factor)
+        
+        # Set minimum zoom level (e.g., 0.1 = 10% of original size)
+        min_zoom = 0.1
+        max_zoom = 50.0  # Also add a reasonable maximum
+        
+        # Only apply zoom if within bounds
+        if min_zoom <= proposed_zoom <= max_zoom:
+            zoom = zoom_in_factor if event.angleDelta().y() > 0 else zoom_out_factor
+            self.scale(zoom, zoom)
+            # Redraw grid with new zoom level
+            self._rebuild_overlays()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent):
         scene_pos = self.mapToScene(event.position().toPoint())
         x_in, y_in = self.scene_to_field(scene_pos)
+        
+        # Update cursor point position (only if menu is not open)
+        if not self.menu_open:
+            # Use the same grid spacing as the visual grid for cursor snapping
+            snap_resolution = self._get_current_grid_spacing()
+            snapped_x, snapped_y = self.snap_to_grid(x_in, y_in, snap_resolution)
+            self.cursor_field_pos = (snapped_x, snapped_y)
+            self._draw_cursor_point()
+        
         self.cursorMoved.emit(x_in, y_in)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent):
-        scene_pos = self.mapToScene(event.position().toPoint())
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            # Check selection on points (nearest within radius)
-            nearest_idx = -1
-            nearest_dist2 = 12*12
-            for item in self.scene().items(scene_pos):
-                if isinstance(item, QtWidgets.QGraphicsEllipseItem):
-                    idx = item.data(0)
-                    if isinstance(idx, int):
-                        center = item.rect().center() + item.pos()
-                        d2 = (center.x()-scene_pos.x())**2 + (center.y()-scene_pos.y())**2
-                        if d2 < nearest_dist2:
-                            nearest_dist2 = d2
-                            nearest_idx = idx
-            if nearest_idx != -1:
-                self.selected_index = nearest_idx
-                self.pointSelected.emit(nearest_idx)
-                self._rebuild_overlays()
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
+            # Show context menu for point creation
+            self._show_context_menu(event.globalPosition().toPoint())
         super().mousePressEvent(event)
+    
+    def _show_context_menu(self, global_pos):
+        """Show context menu for creating new points"""
+        self.menu_open = True
+        
+        menu = QtWidgets.QMenu(self)
+        
+        # Add point creation action
+        create_action = menu.addAction("Create Point Here")
+        create_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+        
+        # Add separator and coordinates info
+        menu.addSeparator()
+        coord_text = f"Position: ({self.cursor_field_pos[0]:.1f}, {self.cursor_field_pos[1]:.1f}) in"
+        coord_action = menu.addAction(coord_text)
+        coord_action.setEnabled(False)  # Make it non-clickable info
+        
+        # Connect action
+        create_action.triggered.connect(self._create_point_at_cursor)
+        
+        # Show menu and handle closing
+        action = menu.exec(global_pos)
+        self.menu_open = False
+        
+        # If no action was selected, just resume cursor tracking
+        if not action:
+            pass
+    
+    def _create_point_at_cursor(self):
+        """Create a new point at the current cursor position using a dialog"""
+        x, y = self.cursor_field_pos
+        
+        # Show point creation dialog
+        dialog = PointCreationDialog(x, y, self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            # Get point data from dialog
+            new_point = dialog.get_point_data()
+            
+            # Ensure unique name
+            existing_names = {p["name"] for p in self.points}
+            original_name = new_point["name"]
+            counter = 1
+            while new_point["name"] in existing_names:
+                new_point["name"] = f"{original_name} ({counter})"
+                counter += 1
+            
+            # Add to points list
+            self.points.append(new_point)
+            
+            # Select the new point
+            self.selected_index = len(self.points) - 1
+            
+            # Rebuild display and emit signals
+            self._rebuild_overlays()
+            self.pointAdded.emit()
+            self.pointSelected.emit(self.selected_index)
 
     # --- Public API for controls ---
-    def set_grid_spacing(self, inches: int):
-        self.grid_spacing_in = clamp(int(inches), 1, 24)
-        self._rebuild_overlays()
-
     def set_grid_opacity(self, op: float):
         self.grid_opacity = clamp(op, 0.05, 1.0)
         c = QtGui.QColor(0, 188, 255, int(255*self.grid_opacity))
@@ -349,25 +626,17 @@ class ControlPanel(QtWidgets.QWidget):
         # Grid controls
         grid_group = QtWidgets.QGroupBox("Grid")
         gg = QtWidgets.QGridLayout(grid_group)
-        gg.addWidget(QtWidgets.QLabel("Spacing (in):"), 0, 0)
-        self.slider_spacing = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.slider_spacing.setRange(1, 24)
-        self.slider_spacing.setValue(1)
-        gg.addWidget(self.slider_spacing, 0, 1)
-        self.lbl_spacing_val = QtWidgets.QLabel("1")
-        gg.addWidget(self.lbl_spacing_val, 0, 2)
-
-        gg.addWidget(QtWidgets.QLabel("Opacity:"), 1, 0)
+        gg.addWidget(QtWidgets.QLabel("Opacity:"), 0, 0)
         self.slider_opacity = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.slider_opacity.setRange(5, 100)
         self.slider_opacity.setValue(50)
-        gg.addWidget(self.slider_opacity, 1, 1)
+        gg.addWidget(self.slider_opacity, 0, 1)
         self.lbl_opacity_val = QtWidgets.QLabel("0.50")
-        gg.addWidget(self.lbl_opacity_val, 1, 2)
+        gg.addWidget(self.lbl_opacity_val, 0, 2)
 
         self.chk_labels = QtWidgets.QCheckBox("Show point labels")
         self.chk_labels.setChecked(True)
-        gg.addWidget(self.chk_labels, 2, 0, 1, 3)
+        gg.addWidget(self.chk_labels, 1, 0, 1, 3)
 
         layout.addWidget(grid_group)
 
@@ -432,7 +701,6 @@ class ControlPanel(QtWidgets.QWidget):
         layout.addStretch(1)
 
         # Wire signals
-        self.slider_spacing.valueChanged.connect(self._on_spacing_changed)
         self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
         self.chk_labels.toggled.connect(self.view.set_show_labels)
         self.list_points.currentRowChanged.connect(self._on_point_chosen)
@@ -445,6 +713,7 @@ class ControlPanel(QtWidgets.QWidget):
 
         self.view.cursorMoved.connect(self._on_cursor_move)
         self.view.pointSelected.connect(self._on_point_selected)
+        self.view.pointAdded.connect(self._refresh_points_list)
 
     def _on_cursor_move(self, x, y):
         self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
@@ -459,6 +728,11 @@ class ControlPanel(QtWidgets.QWidget):
         self.list_points.clear()
         for p in self.view.points:
             self.list_points.addItem(p["name"])
+        
+        # Select the current point if there is one
+        if 0 <= self.view.selected_index < len(self.view.points):
+            self.list_points.setCurrentRow(self.view.selected_index)
+            self._populate_editor_from_view()
 
     def _populate_editor_from_view(self):
         idx = self.list_points.currentRow()
@@ -475,10 +749,6 @@ class ControlPanel(QtWidgets.QWidget):
             self.ed_y.setValue(0.0)
             self.ed_color.setText("#ffd166")
             self.lbl_selected.setText("Selected: none")
-
-    def _on_spacing_changed(self, val):
-        self.lbl_spacing_val.setText(str(val))
-        self.view.set_grid_spacing(val)
 
     def _on_opacity_changed(self, val):
         op = val / 100.0
@@ -629,7 +899,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def run_app():
     parser = argparse.ArgumentParser(description="FTC Field Map Viewer – DECODE")
-    parser.add_argument("--image", default="decode-custom-field-image.png",
+    parser.add_argument("--image", default="Field Maps/decode-dark.png",
                         help="Path to the field background image")
     args = parser.parse_args()
 
