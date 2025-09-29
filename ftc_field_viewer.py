@@ -6,6 +6,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect
 from PySide6.QtWidgets import QGraphicsEffect
 import json
+import math
 import os
 import sys
 import argparse
@@ -99,6 +100,115 @@ class PointCreationDialog(QtWidgets.QDialog):
             "name": self.name_input.text().strip() or "New Point",
             "x": self.x,
             "y": self.y,
+            "color": self.selected_color.name()
+        }
+
+class VectorCreationDialog(QtWidgets.QDialog):
+    """Dialog for creating new vectors with name, magnitude, direction, and color"""
+    
+    def __init__(self, x, y, parent=None):
+        super().__init__(parent)
+        self.x = x
+        self.y = y
+        self.setWindowTitle("Create New Vector")
+        self.setModal(True)
+        self.resize(350, 280)
+        
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Coordinates display (read-only)
+        coord_group = QtWidgets.QGroupBox("Position")
+        coord_layout = QtWidgets.QHBoxLayout(coord_group)
+        coord_label = QtWidgets.QLabel(f"X: {x:.1f} in,  Y: {y:.1f} in")
+        coord_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+        coord_layout.addWidget(coord_label)
+        layout.addWidget(coord_group)
+        
+        # Vector name input
+        name_group = QtWidgets.QGroupBox("Vector Name")
+        name_layout = QtWidgets.QVBoxLayout(name_group)
+        self.name_input = QtWidgets.QLineEdit()
+        self.name_input.setPlaceholderText("Enter vector name...")
+        self.name_input.setText("New Vector")
+        self.name_input.selectAll()
+        name_layout.addWidget(self.name_input)
+        layout.addWidget(name_group)
+        
+        # Magnitude and direction inputs
+        props_group = QtWidgets.QGroupBox("Vector Properties")
+        props_layout = QtWidgets.QGridLayout(props_group)
+        
+        # Magnitude
+        props_layout.addWidget(QtWidgets.QLabel("Magnitude (in):"), 0, 0)
+        self.magnitude_input = QtWidgets.QDoubleSpinBox()
+        self.magnitude_input.setRange(0.1, 1000.0)
+        self.magnitude_input.setValue(10.0)
+        self.magnitude_input.setSuffix(" in")
+        props_layout.addWidget(self.magnitude_input, 0, 1)
+        
+        # Direction
+        props_layout.addWidget(QtWidgets.QLabel("Direction (°):"), 1, 0)
+        self.direction_input = QtWidgets.QDoubleSpinBox()
+        self.direction_input.setRange(0.0, 359.9)
+        self.direction_input.setValue(0.0)
+        self.direction_input.setSuffix("°")
+        self.direction_input.setWrapping(True)
+        props_layout.addWidget(self.direction_input, 1, 1)
+        
+        layout.addWidget(props_group)
+        
+        # Color selection
+        color_group = QtWidgets.QGroupBox("Vector Color")
+        color_layout = QtWidgets.QHBoxLayout(color_group)
+        
+        # Color preview button
+        self.color_button = QtWidgets.QPushButton()
+        self.color_button.setFixedSize(40, 30)
+        self.selected_color = QtGui.QColor("#ff6b6b")  # Default red
+        self.color_button.setStyleSheet(f"background-color: {self.selected_color.name()}; border: 2px solid #333;")
+        self.color_button.clicked.connect(self._choose_color)
+        
+        # Color label
+        color_label = QtWidgets.QLabel("Click to change color")
+        color_layout.addWidget(self.color_button)
+        color_layout.addWidget(color_label)
+        color_layout.addStretch()
+        layout.addWidget(color_group)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        
+        create_button = QtWidgets.QPushButton("Create Vector")
+        create_button.setDefault(True)
+        create_button.clicked.connect(self.accept)
+        
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(create_button)
+        layout.addLayout(button_layout)
+        
+        # Focus on name input
+        self.name_input.setFocus()
+    
+    def _choose_color(self):
+        """Open color picker dialog"""
+        color = QtWidgets.QColorDialog.getColor(self.selected_color, self, "Choose Vector Color")
+        if color.isValid():
+            self.selected_color = color
+            self.color_button.setStyleSheet(f"background-color: {color.name()}; border: 2px solid #333;")
+    
+    def get_vector_data(self):
+        """Return the vector data from the dialog"""
+        return {
+            "name": self.name_input.text().strip() or "New Vector",
+            "x": self.x,
+            "y": self.y,
+            "magnitude": self.magnitude_input.value(),
+            "direction": self.direction_input.value(),
             "color": self.selected_color.name()
         }
 
@@ -196,6 +306,8 @@ class FieldView(QtWidgets.QGraphicsView):
     cursorMoved = QtCore.Signal(float, float)  # emits field coords (x,y) inches
     pointSelected = QtCore.Signal(int)        # emits index in points list or -1
     pointAdded = QtCore.Signal()              # emits when a new point is created
+    vectorSelected = QtCore.Signal(int)       # emits index in vectors list or -1
+    vectorAdded = QtCore.Signal()             # emits when a new vector is created
 
     def __init__(self, scene, image_pixmap, *args, **kwargs):
         super().__init__(scene, *args, **kwargs)
@@ -218,6 +330,11 @@ class FieldView(QtWidgets.QGraphicsView):
         self.point_items = []               # QGraphicsEllipseItem + label
         self.selected_index = -1
         self.show_labels = True
+        
+        # Vector management
+        self.vectors = []                   # list of dicts with name,x,y,magnitude,direction,color
+        self.vector_items = []              # QGraphicsItem for vector arrows
+        self.selected_vector_index = -1
 
         # Cursor-following snap point
         self.cursor_point = None
@@ -291,6 +408,7 @@ class FieldView(QtWidgets.QGraphicsView):
         self._clear_overlays()
         self._draw_grid()
         self._draw_points()
+        self._draw_vectors()
         self._draw_cursor_point()
 
     def _draw_grid(self):
@@ -432,6 +550,109 @@ class FieldView(QtWidgets.QGraphicsView):
                 self.point_items.append(background)
                 self.point_items.append(label)
     
+    def _draw_vectors(self):
+        """Draw vectors as arrows with magnitude and direction"""
+        # Clear existing vector items from scene
+        for item in self.vector_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
+        self.vector_items.clear()
+        
+        for idx, v in enumerate(self.vectors):
+            color = QtGui.QColor(v.get("color", "#ff6b6b"))
+            pos = self.field_to_scene(v["x"], v["y"])
+            magnitude = v["magnitude"]
+            direction = v["direction"]
+            
+            # Convert direction to radians (0° = positive X axis)
+            direction_rad = math.radians(direction)
+            
+            # Calculate scale factor for magnitude (pixels per inch)
+            # Use the same scaling as the field coordinates
+            scale_factor = min(self.image_rect.width() / FIELD_SIZE_IN, self.image_rect.height() / FIELD_SIZE_IN)
+            arrow_length = magnitude * scale_factor
+            
+            # Calculate end point of arrow
+            end_x = pos.x() + arrow_length * math.cos(direction_rad)
+            end_y = pos.y() - arrow_length * math.sin(direction_rad)  # Negative because Y axis is flipped
+            
+            # Draw arrow shaft
+            line_width = 3.0 if idx == self.selected_vector_index else 2.0
+            pen = QtGui.QPen(color)
+            pen.setWidthF(line_width)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            
+            arrow_line = self.scene().addLine(pos.x(), pos.y(), end_x, end_y, pen)
+            arrow_line.setZValue(4)
+            self.vector_items.append(arrow_line)
+            
+            # Draw arrowhead
+            arrow_head_length = 12.0
+            arrow_head_angle = math.radians(25)  # 25 degrees from shaft
+            
+            # Calculate arrowhead points
+            head1_x = end_x - arrow_head_length * math.cos(direction_rad - arrow_head_angle)
+            head1_y = end_y + arrow_head_length * math.sin(direction_rad - arrow_head_angle)
+            head2_x = end_x - arrow_head_length * math.cos(direction_rad + arrow_head_angle)
+            head2_y = end_y + arrow_head_length * math.sin(direction_rad + arrow_head_angle)
+            
+            # Create arrowhead as polygon
+            arrowhead = QtGui.QPolygonF([
+                QtCore.QPointF(end_x, end_y),
+                QtCore.QPointF(head1_x, head1_y),
+                QtCore.QPointF(head2_x, head2_y)
+            ])
+            
+            arrowhead_item = self.scene().addPolygon(arrowhead, pen, QtGui.QBrush(color))
+            arrowhead_item.setZValue(4)
+            self.vector_items.append(arrowhead_item)
+            
+            # Add vector label if labels are enabled
+            if self.show_labels:
+                # Create text label with magnitude and direction info
+                label_text = f"{v['name']}\n{magnitude:.1f}in @ {direction:.0f}°"
+                label = self.scene().addText(label_text)
+                
+                # Set font and color
+                font = QtGui.QFont("Arial", 10, QtGui.QFont.Weight.Bold)
+                label.setFont(font)
+                label.setDefaultTextColor(color.lighter(150))
+                
+                # Smart label positioning to avoid covering vector
+                # Position label on the opposite side from where vector is pointing
+                text_rect = label.boundingRect()
+                
+                # For small vectors (< 30 pixels), place label further away
+                if arrow_length < 30:
+                    offset_distance = 50  # Further away for small vectors
+                else:
+                    offset_distance = 35  # Closer for larger vectors
+                
+                # Calculate opposite direction (180 degrees from vector direction)
+                opposite_direction_rad = direction_rad + math.pi
+                label_offset_x = offset_distance * math.cos(opposite_direction_rad)
+                label_offset_y = -offset_distance * math.sin(opposite_direction_rad)
+                
+                # Position label on the opposite side of where the vector points
+                label_pos = pos + QtCore.QPointF(label_offset_x, label_offset_y - text_rect.height()/2)
+                label.setPos(label_pos)
+                label.setZValue(6)
+                
+                # Create background for label
+                text_rect = label.boundingRect()
+                padding = 3
+                bg_rect = text_rect.adjusted(-padding, -padding, padding, padding)
+                
+                background = self.scene().addRect(
+                    bg_rect.translated(label.pos()),
+                    QtGui.QPen(color.darker(120)),
+                    QtGui.QBrush(QtGui.QColor(0, 0, 0, 180))
+                )
+                background.setZValue(5)
+                
+                self.vector_items.append(background)
+                self.vector_items.append(label)
+    
     def _draw_cursor_point(self):
         """Draw the cursor-following snap point"""
         if self.cursor_point and self.cursor_point.scene() == self.scene():
@@ -478,10 +699,16 @@ class FieldView(QtWidgets.QGraphicsView):
         
         # Update cursor point position (only if menu is not open)
         if not self.menu_open:
-            # Use the same grid spacing as the visual grid for cursor snapping
-            snap_resolution = self._get_current_grid_spacing()
-            snapped_x, snapped_y = self.snap_to_grid(x_in, y_in, snap_resolution)
-            self.cursor_field_pos = (snapped_x, snapped_y)
+            # Check if Shift key is pressed to disable snapping
+            modifiers = QtWidgets.QApplication.keyboardModifiers()
+            if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                # No snapping when shift is pressed
+                self.cursor_field_pos = (x_in, y_in)
+            else:
+                # Use the same grid spacing as the visual grid for cursor snapping
+                snap_resolution = self._get_current_grid_spacing()
+                snapped_x, snapped_y = self.snap_to_grid(x_in, y_in, snap_resolution)
+                self.cursor_field_pos = (snapped_x, snapped_y)
             self._draw_cursor_point()
         
         self.cursorMoved.emit(x_in, y_in)
@@ -500,8 +727,12 @@ class FieldView(QtWidgets.QGraphicsView):
         menu = QtWidgets.QMenu(self)
         
         # Add point creation action
-        create_action = menu.addAction("Create Point Here")
-        create_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+        create_point_action = menu.addAction("Create Point Here")
+        create_point_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+        
+        # Add vector creation action
+        create_vector_action = menu.addAction("Create Vector Here")
+        create_vector_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowRight))
         
         # Add separator and coordinates info
         menu.addSeparator()
@@ -509,8 +740,9 @@ class FieldView(QtWidgets.QGraphicsView):
         coord_action = menu.addAction(coord_text)
         coord_action.setEnabled(False)  # Make it non-clickable info
         
-        # Connect action
-        create_action.triggered.connect(self._create_point_at_cursor)
+        # Connect actions
+        create_point_action.triggered.connect(self._create_point_at_cursor)
+        create_vector_action.triggered.connect(self._create_vector_at_cursor)
         
         # Show menu and handle closing
         action = menu.exec(global_pos)
@@ -548,6 +780,35 @@ class FieldView(QtWidgets.QGraphicsView):
             self._rebuild_overlays()
             self.pointAdded.emit()
             self.pointSelected.emit(self.selected_index)
+    
+    def _create_vector_at_cursor(self):
+        """Create a new vector at the current cursor position using a dialog"""
+        x, y = self.cursor_field_pos
+        
+        # Show vector creation dialog
+        dialog = VectorCreationDialog(x, y, self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            # Get vector data from dialog
+            new_vector = dialog.get_vector_data()
+            
+            # Ensure unique name
+            existing_names = {v["name"] for v in self.vectors}
+            original_name = new_vector["name"]
+            counter = 1
+            while new_vector["name"] in existing_names:
+                new_vector["name"] = f"{original_name} ({counter})"
+                counter += 1
+            
+            # Add to vectors list
+            self.vectors.append(new_vector)
+            
+            # Select the new vector
+            self.selected_vector_index = len(self.vectors) - 1
+            
+            # Rebuild display and emit signals
+            self._rebuild_overlays()
+            self.vectorAdded.emit()
+            self.vectorSelected.emit(self.selected_vector_index)
 
     # --- Public API for controls ---
     def set_grid_opacity(self, op: float):
@@ -580,6 +841,35 @@ class FieldView(QtWidgets.QGraphicsView):
             if x is not None: p["x"] = float(x)
             if y is not None: p["y"] = float(y)
             if color is not None: p["color"] = color
+            self._rebuild_overlays()
+
+    def add_vector(self, name, x, y, magnitude, direction, color="#ff6b6b"):
+        self.vectors.append({
+            "name": name, 
+            "x": float(x), 
+            "y": float(y), 
+            "magnitude": float(magnitude),
+            "direction": float(direction),
+            "color": color
+        })
+        self.selected_vector_index = len(self.vectors) - 1
+        self._rebuild_overlays()
+
+    def remove_selected_vector(self):
+        if 0 <= self.selected_vector_index < len(self.vectors):
+            del self.vectors[self.selected_vector_index]
+            self.selected_vector_index = -1
+            self._rebuild_overlays()
+
+    def update_selected_vector(self, name=None, x=None, y=None, magnitude=None, direction=None, color=None):
+        if 0 <= self.selected_vector_index < len(self.vectors):
+            v = self.vectors[self.selected_vector_index]
+            if name is not None: v["name"] = name
+            if x is not None: v["x"] = float(x)
+            if y is not None: v["y"] = float(y)
+            if magnitude is not None: v["magnitude"] = float(magnitude)
+            if direction is not None: v["direction"] = float(direction)
+            if color is not None: v["color"] = color
             self._rebuild_overlays()
 
     def save_points(self, path):
@@ -677,6 +967,56 @@ class ControlPanel(QtWidgets.QWidget):
 
         layout.addWidget(pts_group)
 
+        # Vectors list + editor
+        vec_group = QtWidgets.QGroupBox("Vectors")
+        vg = QtWidgets.QGridLayout(vec_group)
+
+        self.list_vectors = QtWidgets.QListWidget()
+        self._refresh_vectors_list()
+        vg.addWidget(self.list_vectors, 0, 0, 6, 1)
+
+        vg.addWidget(QtWidgets.QLabel("Name"), 0, 1)
+        self.ed_vec_name = QtWidgets.QLineEdit()
+        vg.addWidget(self.ed_vec_name, 0, 2)
+
+        vg.addWidget(QtWidgets.QLabel("X (in)"), 1, 1)
+        self.ed_vec_x = QtWidgets.QDoubleSpinBox()
+        self.ed_vec_x.setRange(-HALF_FIELD, HALF_FIELD)
+        self.ed_vec_x.setDecimals(3)
+        vg.addWidget(self.ed_vec_x, 1, 2)
+
+        vg.addWidget(QtWidgets.QLabel("Y (in)"), 2, 1)
+        self.ed_vec_y = QtWidgets.QDoubleSpinBox()
+        self.ed_vec_y.setRange(-HALF_FIELD, HALF_FIELD)
+        self.ed_vec_y.setDecimals(3)
+        vg.addWidget(self.ed_vec_y, 2, 2)
+
+        vg.addWidget(QtWidgets.QLabel("Mag (in)"), 3, 1)
+        self.ed_vec_mag = QtWidgets.QDoubleSpinBox()
+        self.ed_vec_mag.setRange(0.1, 1000.0)
+        self.ed_vec_mag.setDecimals(2)
+        vg.addWidget(self.ed_vec_mag, 3, 2)
+
+        vg.addWidget(QtWidgets.QLabel("Dir (°)"), 4, 1)
+        self.ed_vec_dir = QtWidgets.QDoubleSpinBox()
+        self.ed_vec_dir.setRange(0.0, 359.9)
+        self.ed_vec_dir.setDecimals(1)
+        self.ed_vec_dir.setWrapping(True)
+        vg.addWidget(self.ed_vec_dir, 4, 2)
+
+        vg.addWidget(QtWidgets.QLabel("Color"), 5, 1)
+        self.ed_vec_color = QtWidgets.QLineEdit("#ff6b6b")
+        vg.addWidget(self.ed_vec_color, 5, 2)
+
+        vec_btn_row = QtWidgets.QHBoxLayout()
+        self.btn_vec_add = QtWidgets.QPushButton("Add")
+        self.btn_vec_update = QtWidgets.QPushButton("Update")
+        self.btn_vec_remove = QtWidgets.QPushButton("Remove")
+        vec_btn_row.addWidget(self.btn_vec_add); vec_btn_row.addWidget(self.btn_vec_update); vec_btn_row.addWidget(self.btn_vec_remove)
+        vg.addLayout(vec_btn_row, 6, 1, 1, 2)
+
+        layout.addWidget(vec_group)
+
         # Save/Load/Export
         io_group = QtWidgets.QGroupBox("I/O")
         ig = QtWidgets.QHBoxLayout(io_group)
@@ -714,6 +1054,14 @@ class ControlPanel(QtWidgets.QWidget):
         self.view.cursorMoved.connect(self._on_cursor_move)
         self.view.pointSelected.connect(self._on_point_selected)
         self.view.pointAdded.connect(self._refresh_points_list)
+        self.view.vectorSelected.connect(self._on_vector_selected)
+        self.view.vectorAdded.connect(self._refresh_vectors_list)
+        
+        # Vector button connections
+        self.list_vectors.currentRowChanged.connect(self._on_vector_chosen)
+        self.btn_vec_add.clicked.connect(self._on_vec_add)
+        self.btn_vec_update.clicked.connect(self._on_vec_update)
+        self.btn_vec_remove.clicked.connect(self._on_vec_remove)
 
     def _on_cursor_move(self, x, y):
         self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
@@ -733,6 +1081,73 @@ class ControlPanel(QtWidgets.QWidget):
         if 0 <= self.view.selected_index < len(self.view.points):
             self.list_points.setCurrentRow(self.view.selected_index)
             self._populate_editor_from_view()
+    
+    def _refresh_vectors_list(self):
+        if not hasattr(self, "list_vectors"):
+            return
+        self.list_vectors.clear()
+        for v in self.view.vectors:
+            self.list_vectors.addItem(v["name"])
+        
+        # Select the current vector if there is one
+        if 0 <= self.view.selected_vector_index < len(self.view.vectors):
+            self.list_vectors.setCurrentRow(self.view.selected_vector_index)
+            self._populate_vector_editor_from_view()
+    
+    def _on_vector_selected(self, idx):
+        self.list_vectors.setCurrentRow(idx)
+        self._populate_vector_editor_from_view()
+    
+    def _on_vector_chosen(self, row):
+        if 0 <= row < len(self.view.vectors):
+            self.view.selected_vector_index = row
+            self.view._rebuild_overlays()
+            self._populate_vector_editor_from_view()
+    
+    def _populate_vector_editor_from_view(self):
+        idx = self.list_vectors.currentRow()
+        if 0 <= idx < len(self.view.vectors):
+            v = self.view.vectors[idx]
+            self.ed_vec_name.setText(v["name"])
+            self.ed_vec_x.setValue(v["x"])
+            self.ed_vec_y.setValue(v["y"])
+            self.ed_vec_mag.setValue(v["magnitude"])
+            self.ed_vec_dir.setValue(v["direction"])
+            self.ed_vec_color.setText(v.get("color", "#ff6b6b"))
+        else:
+            self.ed_vec_name.clear()
+            self.ed_vec_x.setValue(0.0)
+            self.ed_vec_y.setValue(0.0)
+            self.ed_vec_mag.setValue(10.0)
+            self.ed_vec_dir.setValue(0.0)
+            self.ed_vec_color.setText("#ff6b6b")
+    
+    def _on_vec_add(self):
+        name = self.ed_vec_name.text().strip() or "New Vector"
+        x = self.ed_vec_x.value()
+        y = self.ed_vec_y.value()
+        magnitude = self.ed_vec_mag.value()
+        direction = self.ed_vec_dir.value()
+        color = self.ed_vec_color.text().strip() or "#ff6b6b"
+        self.view.add_vector(name, x, y, magnitude, direction, color)
+        self._refresh_vectors_list()
+        self.list_vectors.setCurrentRow(self.view.selected_vector_index)
+    
+    def _on_vec_update(self):
+        name = self.ed_vec_name.text().strip() or None
+        x = self.ed_vec_x.value()
+        y = self.ed_vec_y.value()
+        magnitude = self.ed_vec_mag.value()
+        direction = self.ed_vec_dir.value()
+        color = self.ed_vec_color.text().strip() or None
+        self.view.update_selected_vector(name, x, y, magnitude, direction, color)
+        self._refresh_vectors_list()
+        self.list_vectors.setCurrentRow(self.view.selected_vector_index)
+    
+    def _on_vec_remove(self):
+        self.view.remove_selected_vector()
+        self._refresh_vectors_list()
+        self._populate_vector_editor_from_view()
 
     def _populate_editor_from_view(self):
         idx = self.list_points.currentRow()
@@ -826,10 +1241,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view = FieldView(scene, pixmap)
         self.setCentralWidget(self.view)
 
-        # Controls (dock on right)
+        # Controls (dock on right) - wrapped in scroll area
         self.panel = ControlPanel(self.view)
+        
+        # Create scroll area for the control panel
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidget(self.panel)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setMinimumWidth(320)  # Ensure minimum width for controls
+        
         dock = QtWidgets.QDockWidget("Controls", self)
-        dock.setWidget(self.panel)
+        dock.setWidget(scroll_area)
         dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
