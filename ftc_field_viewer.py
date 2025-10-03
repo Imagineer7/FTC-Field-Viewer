@@ -14,10 +14,35 @@ import argparse
 FIELD_SIZE_IN = 141.0
 HALF_FIELD = FIELD_SIZE_IN / 2.0
 
-DEFAULT_POINTS = [
-    {"name": "Red Goal (ID 24)", "x": -58.3727, "y": 55.6425, "color": "#ff4d4d"},
-    {"name": "Blue Goal (ID 20)", "x": -58.3727, "y": -55.6425, "color": "#4da6ff"},
-]
+def load_default_points_for_image(image_path: str) -> list:
+    """Load default points from JSON file based on image filename"""
+    if not image_path or not os.path.exists(image_path):
+        return []
+    
+    # Get the base filename without extension
+    base_name = os.path.splitext(os.path.basename(image_path))[0]
+    
+    # Look for corresponding JSON file in Default Points directory
+    script_dir = os.path.dirname(__file__)
+    default_points_dir = os.path.join(script_dir, "Default Points")
+    json_file = os.path.join(default_points_dir, f"{base_name}.json")
+    
+    try:
+        if os.path.exists(json_file):
+            with open(json_file, 'r', encoding='utf-8') as f:
+                points = json.load(f)
+                # Validate that each point has required fields
+                validated_points = []
+                for point in points:
+                    if all(key in point for key in ['name', 'x', 'y', 'color']):
+                        validated_points.append(point)
+                    else:
+                        print(f"Warning: Invalid point in {json_file}: {point}")
+                return validated_points
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error loading default points from {json_file}: {e}")
+    
+    return []  # Return empty list if no valid points file found
 
 class PointCreationDialog(QtWidgets.QDialog):
     """Dialog for creating new points with name, color, and coordinate input"""
@@ -420,12 +445,13 @@ class FieldView(QtWidgets.QGraphicsView):
     cursorMoved = QtCore.Signal(float, float)  # emits field coords (x,y) inches
     pointSelected = QtCore.Signal(int)        # emits index in points list or -1
     pointAdded = QtCore.Signal()              # emits when a new point is created
+    pointsReloaded = QtCore.Signal()          # emits when default points are reloaded
     vectorSelected = QtCore.Signal(int)       # emits index in vectors list or -1
     vectorAdded = QtCore.Signal()             # emits when a new vector is created
     lineSelected = QtCore.Signal(int)         # emits index in lines list or -1
     lineAdded = QtCore.Signal()               # emits when a new line is created
 
-    def __init__(self, scene, image_pixmap, *args, **kwargs):
+    def __init__(self, scene, image_pixmap, image_path: str = "", *args, **kwargs):
         super().__init__(scene, *args, **kwargs)
         self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -435,6 +461,7 @@ class FieldView(QtWidgets.QGraphicsView):
 
         self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
         self.scene().addItem(self.image_item)
+        self.current_image_path = image_path
 
         self.grid_opacity = 0.5
         self.grid_pen = QtGui.QPen(QtGui.QColor(0, 188, 255, int(255*self.grid_opacity)), 0.0)
@@ -442,7 +469,8 @@ class FieldView(QtWidgets.QGraphicsView):
         self.major_grid_pen = QtGui.QPen(QtGui.QColor(0, 188, 255, int(255*self.grid_opacity)), 0.0)
         self.major_grid_pen.setWidthF(1.2)
 
-        self.points = list(DEFAULT_POINTS)  # list of dicts with name,x,y,color
+        # Load default points based on the image
+        self.points = load_default_points_for_image(image_path)
         self.point_items = []               # QGraphicsEllipseItem + label
         self.selected_index = -1
         self.show_labels = True
@@ -467,6 +495,36 @@ class FieldView(QtWidgets.QGraphicsView):
         self.setBackgroundBrush(QtGui.QColor("#0b0f14"))
 
         self._rebuild_overlays()
+
+    def reload_default_points_for_image(self, image_path: str):
+        """Reload default points when switching to a different field image"""
+        self.current_image_path = image_path
+        
+        # Ask user if they want to load default points for the new field
+        if self.points:  # If there are existing points
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Load Default Points",
+                f"Load default points for {os.path.basename(image_path)}?\n\n"
+                "This will replace your current points. Choose:\n"
+                "• Yes: Replace with field-specific default points\n"
+                "• No: Keep your current points",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.No:
+                return
+        
+        # Load the new default points
+        new_default_points = load_default_points_for_image(image_path)
+        self.points = new_default_points
+        self.selected_index = -1
+        
+        # Refresh the display
+        self._rebuild_overlays()
+        
+        # Notify that points were reloaded
+        self.pointsReloaded.emit()
 
     # --- Coordinate transforms ---
     def field_to_scene(self, x_in, y_in):
@@ -1489,9 +1547,9 @@ class FieldImageSelector(QtWidgets.QWidget):
             except (OSError, PermissionError):
                 continue
         
-        # Combine field-related images first, then add up to 20 other images
+        # Combine field-related images first, then add up to 20 other images that aren't already included
         found_images.update(field_related_images)
-        other_images_list = sorted(list(other_images))
+        other_images_list = sorted(list(other_images - field_related_images))  # Remove any overlap
         found_images.update(other_images_list[:max(0, 25 - len(field_related_images))])
         
         # Convert to sorted list
@@ -1665,9 +1723,11 @@ class ControlPanel(QtWidgets.QWidget):
         coord_group = QtWidgets.QGroupBox("Cursor / Selected")
         g = QtWidgets.QGridLayout(coord_group)
         self.lbl_cursor = QtWidgets.QLabel("Cursor: (x=?, y=?) in")
+        self.lbl_snapped = QtWidgets.QLabel("Snapped: (x=?, y=?) in")
         self.lbl_selected = QtWidgets.QLabel("Selected: none")
         g.addWidget(self.lbl_cursor, 0, 0, 1, 2)
-        g.addWidget(self.lbl_selected, 1, 0, 1, 2)
+        g.addWidget(self.lbl_snapped, 1, 0, 1, 2)
+        g.addWidget(self.lbl_selected, 2, 0, 1, 2)
         layout.addWidget(coord_group)
 
         # Grid controls
@@ -1874,6 +1934,7 @@ class ControlPanel(QtWidgets.QWidget):
         self.view.cursorMoved.connect(self._on_cursor_move)
         self.view.pointSelected.connect(self._on_point_selected)
         self.view.pointAdded.connect(self._refresh_points_list)
+        self.view.pointsReloaded.connect(self._refresh_points_list)
         self.view.vectorSelected.connect(self._on_vector_selected)
         self.view.vectorAdded.connect(self._refresh_vectors_list)
         self.view.lineSelected.connect(self._on_line_selected)
@@ -1901,6 +1962,11 @@ class ControlPanel(QtWidgets.QWidget):
 
     def _on_cursor_move(self, x, y):
         self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
+        
+        # Get current grid spacing and calculate snapped coordinates
+        grid_spacing = self.view._get_current_grid_spacing()
+        snapped_x, snapped_y = self.view.snap_to_grid(x, y, grid_spacing)
+        self.lbl_snapped.setText(f"Snapped: (x={snapped_x:0.2f}, y={snapped_y:0.2f}) in")
 
     def _on_point_selected(self, idx):
         self.list_points.setCurrentRow(idx)
@@ -2368,7 +2434,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Scene + View
         scene = QtWidgets.QGraphicsScene(self)
-        self.view = FieldView(scene, pixmap)
+        self.view = FieldView(scene, pixmap, image_path)
         self.setCentralWidget(self.view)
 
         # Controls (dock on right) - wrapped in scroll area
@@ -2422,6 +2488,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.image_item.setPixmap(pixmap)
             self.view.image_rect = self.view.image_item.boundingRect()
             self.view.setSceneRect(self.view.image_rect)
+            
+            # Reload default points for the new field
+            self.view.reload_default_points_for_image(new_image_path)
+            
+            # Rebuild overlays after points are loaded
             self.view._rebuild_overlays()
             
             # Update current image path

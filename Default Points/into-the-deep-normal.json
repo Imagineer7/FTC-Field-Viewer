@@ -1,0 +1,44 @@
+[
+    {
+        "name": "Red Sample Scoring Zone",
+        "x": -61.5,
+        "y": -61.5,
+        "color": "#ff4d4d"
+    },
+    {
+        "name": "Blue Observation Zone",
+        "x": -58.75,
+        "y": 64.62,
+        "color": "#4da6ff"
+    },
+    {
+        "name": "Red Specimen Scoring",
+        "x": 0,
+        "y": -23.5,
+        "color": "#ff6b6b"
+    },
+    {
+        "name": "Blue Specimen Scoring",
+        "x": 0,
+        "y": 23.5,
+        "color": "#6ba6ff"
+    },
+    {
+        "name": "Red Observation Zone",
+        "x": 58.75,
+        "y": -64.62,
+        "color": "#ff9999"
+    },
+    {
+        "name": "Blue Sample Scoring Zone",
+        "x": 61.69,
+        "y": 61.69,
+        "color": "#99b3ff"
+    },
+    {
+        "name": "Submersible",
+        "x": 0.0,
+        "y": 0.0,
+        "color": "#00ffd0"
+    }
+]
