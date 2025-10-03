@@ -1,8 +1,10 @@
 # ftc_field_viewer.py
 # Interactive FTC field map viewer with grid and editable points.
 # See usage instructions at the bottom.
+# Version only changes the first number if it is a big feature update. Otherwise for small feature(s)
+# changes the second number changes and the last number is for bug fixes.
 
-__version__ = "2.1.0"
+__version__ = "1.2.0"
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect
@@ -489,6 +491,13 @@ class FieldView(QtWidgets.QGraphicsView):
         self.line_items = []                # QGraphicsItem for line segments
         self.selected_line_index = -1
 
+        # Measurement system
+        self.measurement_mode = False       # Toggle measurement mode
+        self.measurement_tool = "distance"  # distance, angle, area, point_to_line
+        self.measurement_points = []        # Points selected for current measurement
+        self.measurement_items = []         # Visual items for measurements
+        self.show_pixel_coords = False     # Toggle between field and pixel coordinates
+        
         # Cursor-following snap point
         self.cursor_point = None
         self.cursor_field_pos = (0, 0)  # Current snapped position in field coordinates
@@ -1211,9 +1220,31 @@ class FieldView(QtWidgets.QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent):
-        if event.button() == QtCore.Qt.MouseButton.RightButton:
-            # Show context menu for point creation
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self.measurement_mode:
+            # Handle measurement tool clicks
+            field_x, field_y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
+            
+            if self.measurement_tool == "distance":
+                self.add_measurement_point(field_x, field_y)
+                if len(self.measurement_points) >= 2:
+                    # Distance measurement complete, reset for next measurement
+                    QtCore.QTimer.singleShot(2000, self.clear_current_measurement)  # Clear after 2 seconds
+            elif self.measurement_tool == "angle":
+                self.add_measurement_point(field_x, field_y)
+                if len(self.measurement_points) >= 3:
+                    # Angle measurement complete, reset for next measurement
+                    QtCore.QTimer.singleShot(3000, self.clear_current_measurement)  # Clear after 3 seconds
+            elif self.measurement_tool == "area":
+                self.add_measurement_point(field_x, field_y)
+                # Area measurement continues until user switches tools or disables measurement mode
+                
+        elif event.button() == QtCore.Qt.MouseButton.RightButton and not self.measurement_mode:
+            # Show context menu for point creation (only when not in measurement mode)
             self._show_context_menu(event.globalPosition().toPoint())
+        elif event.button() == QtCore.Qt.MouseButton.RightButton and self.measurement_mode:
+            # Right-click in measurement mode clears current measurement
+            self.clear_current_measurement()
+            
         super().mousePressEvent(event)
     
     def _show_context_menu(self, global_pos):
@@ -1496,6 +1527,191 @@ class FieldView(QtWidgets.QGraphicsView):
                 self.show_default_points = data.get("show_default_points", True)
         self.selected_index = -1
         self._rebuild_overlays()
+
+    # === Measurement Tools ===
+    def set_measurement_mode(self, enabled: bool):
+        """Enable/disable measurement mode"""
+        self.measurement_mode = enabled
+        if not enabled:
+            self.clear_current_measurement()
+    
+    def set_measurement_tool(self, tool: str):
+        """Set the active measurement tool"""
+        self.measurement_tool = tool
+        self.clear_current_measurement()
+    
+    def set_coordinate_display_mode(self, show_pixel: bool):
+        """Toggle between field coordinates and pixel coordinates"""
+        self.show_pixel_coords = show_pixel
+        self.update()
+    
+    def clear_current_measurement(self):
+        """Clear the current measurement in progress"""
+        self.measurement_points.clear()
+        for item in self.measurement_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
+        self.measurement_items.clear()
+    
+    def add_measurement_point(self, field_x: float, field_y: float):
+        """Add a point to the current measurement"""
+        self.measurement_points.append((field_x, field_y))
+        self._update_measurement_display()
+    
+    def _update_measurement_display(self):
+        """Update the visual display of the current measurement"""
+        # Clear previous measurement visuals
+        for item in self.measurement_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
+        self.measurement_items.clear()
+        
+        if len(self.measurement_points) < 2:
+            return
+            
+        pen = QtGui.QPen(QtGui.QColor("#ff6b6b"), 2.0)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        
+        if self.measurement_tool == "distance" and len(self.measurement_points) >= 2:
+            self._draw_distance_measurement()
+        elif self.measurement_tool == "angle" and len(self.measurement_points) >= 3:
+            self._draw_angle_measurement()
+        elif self.measurement_tool == "area" and len(self.measurement_points) >= 3:
+            self._draw_area_measurement()
+    
+    def _draw_distance_measurement(self):
+        """Draw distance measurement between two points"""
+        if len(self.measurement_points) < 2:
+            return
+            
+        p1 = self.field_to_scene(*self.measurement_points[0])
+        p2 = self.field_to_scene(*self.measurement_points[1])
+        
+        # Draw line
+        pen = QtGui.QPen(QtGui.QColor("#ff6b6b"), 2.0)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        line = self.scene().addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
+        line.setZValue(10)
+        self.measurement_items.append(line)
+        
+        # Calculate distance
+        x1, y1 = self.measurement_points[0]
+        x2, y2 = self.measurement_points[1]
+        distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        
+        # Draw measurement label
+        mid_x = (p1.x() + p2.x()) / 2
+        mid_y = (p1.y() + p2.y()) / 2
+        
+        label = self.scene().addText(f"{distance:.2f} in")
+        label.setDefaultTextColor(QtGui.QColor("#ff6b6b"))
+        label.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold))
+        label.setPos(mid_x, mid_y - 20)
+        label.setZValue(11)
+        self.measurement_items.append(label)
+    
+    def _draw_angle_measurement(self):
+        """Draw angle measurement between three points"""
+        if len(self.measurement_points) < 3:
+            return
+            
+        # Get the three points
+        p1_field = self.measurement_points[0]
+        p2_field = self.measurement_points[1]  # Vertex point
+        p3_field = self.measurement_points[2]
+        
+        # Convert to scene coordinates
+        p1 = self.field_to_scene(*p1_field)
+        p2 = self.field_to_scene(*p2_field)
+        p3 = self.field_to_scene(*p3_field)
+        
+        # Draw lines from vertex to other points
+        pen = QtGui.QPen(QtGui.QColor("#ff6b6b"), 2.0)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        
+        line1 = self.scene().addLine(p2.x(), p2.y(), p1.x(), p1.y(), pen)
+        line2 = self.scene().addLine(p2.x(), p2.y(), p3.x(), p3.y(), pen)
+        line1.setZValue(10)
+        line2.setZValue(10)
+        self.measurement_items.extend([line1, line2])
+        
+        # Calculate angle
+        x1, y1 = p1_field[0] - p2_field[0], p1_field[1] - p2_field[1]
+        x2, y2 = p3_field[0] - p2_field[0], p3_field[1] - p2_field[1]
+        
+        angle1 = math.atan2(y1, x1)
+        angle2 = math.atan2(y2, x2)
+        angle_diff = abs(angle2 - angle1)
+        if angle_diff > math.pi:
+            angle_diff = 2 * math.pi - angle_diff
+        angle_degrees = math.degrees(angle_diff)
+        
+        # Draw angle label
+        label = self.scene().addText(f"{angle_degrees:.1f}°")
+        label.setDefaultTextColor(QtGui.QColor("#ff6b6b"))
+        label.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold))
+        label.setPos(p2.x() + 15, p2.y() - 15)
+        label.setZValue(11)
+        self.measurement_items.append(label)
+    
+    def _draw_area_measurement(self):
+        """Draw area measurement for polygon"""
+        if len(self.measurement_points) < 3:
+            return
+            
+        # Convert points to scene coordinates
+        scene_points = [self.field_to_scene(*pt) for pt in self.measurement_points]
+        
+        # Create polygon
+        polygon = QtGui.QPolygonF([QtCore.QPointF(p.x(), p.y()) for p in scene_points])
+        
+        # Draw polygon outline
+        pen = QtGui.QPen(QtGui.QColor("#ff6b6b"), 2.0)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        brush = QtGui.QBrush(QtGui.QColor(255, 107, 107, 50))  # Semi-transparent fill
+        
+        poly_item = self.scene().addPolygon(polygon, pen, brush)
+        poly_item.setZValue(9)
+        self.measurement_items.append(poly_item)
+        
+        # Calculate area using shoelace formula
+        area = 0.0
+        n = len(self.measurement_points)
+        for i in range(n):
+            j = (i + 1) % n
+            area += self.measurement_points[i][0] * self.measurement_points[j][1]
+            area -= self.measurement_points[j][0] * self.measurement_points[i][1]
+        area = abs(area) / 2.0
+        
+        # Draw area label at centroid
+        cx = sum(pt[0] for pt in self.measurement_points) / len(self.measurement_points)
+        cy = sum(pt[1] for pt in self.measurement_points) / len(self.measurement_points)
+        center_scene = self.field_to_scene(cx, cy)
+        
+        label = self.scene().addText(f"{area:.1f} sq in")
+        label.setDefaultTextColor(QtGui.QColor("#ff6b6b"))
+        label.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold))
+        label.setPos(center_scene.x() - 30, center_scene.y() - 10)
+        label.setZValue(11)
+        self.measurement_items.append(label)
+    
+    def calculate_point_to_line_distance(self, point_field: tuple, line_index: int) -> float:
+        """Calculate perpendicular distance from a point to a line"""
+        if line_index < 0 or line_index >= len(self.lines):
+            return 0.0
+            
+        line = self.lines[line_index]
+        px, py = point_field
+        x1, y1 = line["x1"], line["y1"]
+        x2, y2 = line["x2"], line["y2"]
+        
+        # Calculate perpendicular distance using formula
+        A = y2 - y1
+        B = x1 - x2
+        C = x2 * y1 - x1 * y2
+        
+        distance = abs(A * px + B * py + C) / math.sqrt(A * A + B * B)
+        return distance
 
     def export_snapshot(self, path):
         # Render the current scene view to an image
@@ -1809,6 +2025,38 @@ class ControlPanel(QtWidgets.QWidget):
 
         layout.addWidget(grid_group)
 
+        # Measurement tools
+        measure_group = QtWidgets.QGroupBox("Measurement Tools")
+        mg = QtWidgets.QGridLayout(measure_group)
+        
+        # Measurement mode toggle
+        self.chk_measurement_mode = QtWidgets.QCheckBox("Enable Measurement Mode")
+        mg.addWidget(self.chk_measurement_mode, 0, 0, 1, 3)
+        
+        # Measurement tool selection
+        mg.addWidget(QtWidgets.QLabel("Tool:"), 1, 0)
+        self.combo_measurement_tool = QtWidgets.QComboBox()
+        self.combo_measurement_tool.addItems(["Distance", "Angle", "Area"])
+        self.combo_measurement_tool.setEnabled(False)  # Initially disabled
+        mg.addWidget(self.combo_measurement_tool, 1, 1, 1, 2)
+        
+        # Coordinate display mode
+        self.chk_pixel_coords = QtWidgets.QCheckBox("Show pixel coordinates")
+        mg.addWidget(self.chk_pixel_coords, 2, 0, 1, 3)
+        
+        # Clear measurements button
+        self.btn_clear_measurements = QtWidgets.QPushButton("Clear Measurements")
+        self.btn_clear_measurements.setEnabled(False)  # Initially disabled
+        mg.addWidget(self.btn_clear_measurements, 3, 0, 1, 3)
+        
+        # Instructions label
+        self.lbl_measurement_instructions = QtWidgets.QLabel("Enable measurement mode and select a tool to begin")
+        self.lbl_measurement_instructions.setStyleSheet("color: #a0a0a0; font-size: 10px;")
+        self.lbl_measurement_instructions.setWordWrap(True)
+        mg.addWidget(self.lbl_measurement_instructions, 4, 0, 1, 3)
+        
+        layout.addWidget(measure_group)
+
         # Points list + editor
         pts_group = QtWidgets.QGroupBox("Points")
         pg = QtWidgets.QGridLayout(pts_group)
@@ -1986,6 +2234,13 @@ class ControlPanel(QtWidgets.QWidget):
         self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
         self.chk_labels.toggled.connect(self.view.set_show_labels)
         self.chk_default_points.toggled.connect(self.view.set_show_default_points)
+        
+        # Measurement controls
+        self.chk_measurement_mode.toggled.connect(self._on_measurement_mode_toggled)
+        self.combo_measurement_tool.currentTextChanged.connect(self._on_measurement_tool_changed)
+        self.chk_pixel_coords.toggled.connect(self.view.set_coordinate_display_mode)
+        self.btn_clear_measurements.clicked.connect(self.view.clear_current_measurement)
+        
         self.list_points.currentRowChanged.connect(self._on_point_chosen)
         self.btn_add.clicked.connect(self._on_add)
         self.btn_update.clicked.connect(self._on_update)
@@ -2024,12 +2279,25 @@ class ControlPanel(QtWidgets.QWidget):
             self.field_selector.set_current_image(new_path)
 
     def _on_cursor_move(self, x, y):
-        self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
-        
-        # Get current grid spacing and calculate snapped coordinates
-        grid_spacing = self.view._get_current_grid_spacing()
-        snapped_x, snapped_y = self.view.snap_to_grid(x, y, grid_spacing)
-        self.lbl_snapped.setText(f"Snapped: (x={snapped_x:0.2f}, y={snapped_y:0.2f}) in")
+        # Check if we should show pixel coordinates
+        if self.chk_pixel_coords.isChecked():
+            # Convert field coordinates back to pixel coordinates
+            pixel_point = self.view.field_to_scene(x, y)
+            self.lbl_cursor.setText(f"Cursor: (x={pixel_point.x():0.0f}, y={pixel_point.y():0.0f}) px")
+            
+            # Get current grid spacing and calculate snapped coordinates
+            grid_spacing = self.view._get_current_grid_spacing()
+            snapped_x, snapped_y = self.view.snap_to_grid(x, y, grid_spacing)
+            snapped_pixel_point = self.view.field_to_scene(snapped_x, snapped_y)
+            self.lbl_snapped.setText(f"Snapped: (x={snapped_pixel_point.x():0.0f}, y={snapped_pixel_point.y():0.0f}) px")
+        else:
+            # Show field coordinates in inches (default)
+            self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
+            
+            # Get current grid spacing and calculate snapped coordinates
+            grid_spacing = self.view._get_current_grid_spacing()
+            snapped_x, snapped_y = self.view.snap_to_grid(x, y, grid_spacing)
+            self.lbl_snapped.setText(f"Snapped: (x={snapped_x:0.2f}, y={snapped_y:0.2f}) in")
 
     def _on_point_selected(self, idx):
         self.list_points.setCurrentRow(idx)
@@ -2429,6 +2697,37 @@ class ControlPanel(QtWidgets.QWidget):
         op = val / 100.0
         self.lbl_opacity_val.setText(f"{op:0.2f}")
         self.view.set_grid_opacity(op)
+
+    def _on_measurement_mode_toggled(self, enabled: bool):
+        """Handle measurement mode toggle"""
+        self.view.set_measurement_mode(enabled)
+        self.combo_measurement_tool.setEnabled(enabled)
+        self.btn_clear_measurements.setEnabled(enabled)
+        
+        if enabled:
+            tool = self.combo_measurement_tool.currentText().lower()
+            self.view.set_measurement_tool(tool)
+            
+            instructions = {
+                "distance": "Click two points to measure distance",
+                "angle": "Click three points to measure angle (vertex in middle)",
+                "area": "Click multiple points to measure area (polygon)"
+            }
+            self.lbl_measurement_instructions.setText(instructions.get(tool, "Select a measurement tool"))
+        else:
+            self.lbl_measurement_instructions.setText("Enable measurement mode and select a tool to begin")
+    
+    def _on_measurement_tool_changed(self, tool_name: str):
+        """Handle measurement tool change"""
+        tool = tool_name.lower()
+        self.view.set_measurement_tool(tool)
+        
+        instructions = {
+            "distance": "Click two points to measure distance",
+            "angle": "Click three points to measure angle (vertex in middle)", 
+            "area": "Click multiple points to measure area (polygon)"
+        }
+        self.lbl_measurement_instructions.setText(instructions.get(tool, "Select a measurement tool"))
 
     def _on_point_chosen(self, row):
         self.view.selected_index = row
