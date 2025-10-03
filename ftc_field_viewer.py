@@ -3,6 +3,8 @@
 # See usage instructions at the bottom.
 # Version only changes the first number if it is a big feature update. Otherwise for small feature(s)
 # changes the second number changes and the last number is for bug fixes.
+#see https://semver.org/ for semantic versioning guidelines.
+#When making changes, please update the RELEASE_NOTES.md file with a summary of changes.
 
 __version__ = "1.3.1"
 
