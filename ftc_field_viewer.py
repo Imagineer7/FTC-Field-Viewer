@@ -2,7 +2,7 @@
 # Interactive FTC field map viewer with grid and editable points.
 # See usage instructions at the bottom.
 
-__version__ = "1.0.0"
+__version__ = "2.1.0"
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect
@@ -472,10 +472,12 @@ class FieldView(QtWidgets.QGraphicsView):
         self.major_grid_pen.setWidthF(1.2)
 
         # Load default points based on the image
-        self.points = load_default_points_for_image(image_path)
+        self.default_points = load_default_points_for_image(image_path)
+        self.user_points = []               # User-added points separate from defaults
         self.point_items = []               # QGraphicsEllipseItem + label
         self.selected_index = -1
         self.show_labels = True
+        self.show_default_points = True    # Control visibility of default points
         
         # Vector management
         self.vectors = []                   # list of dicts with name,x,y,magnitude,direction,color
@@ -498,18 +500,27 @@ class FieldView(QtWidgets.QGraphicsView):
 
         self._rebuild_overlays()
 
+    @property
+    def points(self):
+        """Get all visible points (default + user points based on visibility settings)"""
+        visible_points = []
+        if self.show_default_points:
+            visible_points.extend(self.default_points)
+        visible_points.extend(self.user_points)
+        return visible_points
+    
     def reload_default_points_for_image(self, image_path: str):
         """Reload default points when switching to a different field image"""
         self.current_image_path = image_path
         
         # Ask user if they want to load default points for the new field
-        if self.points:  # If there are existing points
+        if self.user_points or self.default_points:  # If there are existing points
             reply = QtWidgets.QMessageBox.question(
                 self,
                 "Load Default Points",
                 f"Load default points for {os.path.basename(image_path)}?\n\n"
                 "This will replace your current points. Choose:\n"
-                "• Yes: Replace with field-specific default points\n"
+                "• Yes: Replace default points (user points preserved)\n"
                 "• No: Keep your current points",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                 QtWidgets.QMessageBox.StandardButton.Yes
@@ -518,8 +529,7 @@ class FieldView(QtWidgets.QGraphicsView):
                 return
         
         # Load the new default points
-        new_default_points = load_default_points_for_image(image_path)
-        self.points = new_default_points
+        self.default_points = load_default_points_for_image(image_path)
         self.selected_index = -1
         
         # Refresh the display
@@ -1349,21 +1359,52 @@ class FieldView(QtWidgets.QGraphicsView):
     def set_show_labels(self, show: bool):
         self.show_labels = show
         self._rebuild_overlays()
+    
+    def set_show_default_points(self, show: bool):
+        """Control visibility of default points"""
+        self.show_default_points = show
+        self._rebuild_overlays()
+        self.pointsReloaded.emit()  # Notify control panel to refresh
 
     def add_point(self, name, x, y, color="#ffd166"):
-        self.points.append({"name": name, "x": float(x), "y": float(y), "color": color})
-        self.selected_index = len(self.points) - 1
+        self.user_points.append({"name": name, "x": float(x), "y": float(y), "color": color})
+        # Update selected index to account for all visible points
+        all_points = self.points
+        self.selected_index = len(all_points) - 1
         self._rebuild_overlays()
 
     def remove_selected(self):
-        if 0 <= self.selected_index < len(self.points):
-            del self.points[self.selected_index]
+        all_points = self.points
+        if 0 <= self.selected_index < len(all_points):
+            # Determine if this is a default point or user point
+            default_count = len(self.default_points) if self.show_default_points else 0
+            if self.selected_index < default_count:
+                # This is a default point - remove from default_points
+                actual_index = self.selected_index
+                del self.default_points[actual_index]
+            else:
+                # This is a user point - remove from user_points
+                user_index = self.selected_index - default_count
+                del self.user_points[user_index]
+            self.selected_index = -1
             self.selected_index = -1
             self._rebuild_overlays()
 
     def update_selected(self, name=None, x=None, y=None, color=None):
-        if 0 <= self.selected_index < len(self.points):
-            p = self.points[self.selected_index]
+        all_points = self.points
+        if 0 <= self.selected_index < len(all_points):
+            # Determine if this is a default point or user point
+            default_count = len(self.default_points) if self.show_default_points else 0
+            if self.selected_index < default_count:
+                # This is a default point - update in default_points
+                actual_index = self.selected_index
+                p = self.default_points[actual_index]
+            else:
+                # This is a user point - update in user_points
+                user_index = self.selected_index - default_count
+                p = self.user_points[user_index]
+            
+            # Update the point
             if name is not None: p["name"] = name
             if x is not None: p["x"] = float(x)
             if y is not None: p["y"] = float(y)
@@ -1432,12 +1473,27 @@ class FieldView(QtWidgets.QGraphicsView):
             self._rebuild_overlays()
 
     def save_points(self, path):
+        # Save both default and user points with metadata
+        data = {
+            "default_points": self.default_points,
+            "user_points": self.user_points,
+            "show_default_points": self.show_default_points
+        }
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.points, f, indent=2)
+            json.dump(data, f, indent=2)
 
     def load_points(self, path):
         with open(path, "r", encoding="utf-8") as f:
-            self.points = json.load(f)
+            data = json.load(f)
+            if isinstance(data, list):
+                # Legacy format - treat as user points
+                self.user_points = data
+                self.default_points = []
+            else:
+                # New format with separate default and user points
+                self.default_points = data.get("default_points", [])
+                self.user_points = data.get("user_points", [])
+                self.show_default_points = data.get("show_default_points", True)
         self.selected_index = -1
         self._rebuild_overlays()
 
@@ -1746,6 +1802,10 @@ class ControlPanel(QtWidgets.QWidget):
         self.chk_labels = QtWidgets.QCheckBox("Show point labels")
         self.chk_labels.setChecked(True)
         gg.addWidget(self.chk_labels, 1, 0, 1, 3)
+        
+        self.chk_default_points = QtWidgets.QCheckBox("Show default points")
+        self.chk_default_points.setChecked(True)
+        gg.addWidget(self.chk_default_points, 2, 0, 1, 3)
 
         layout.addWidget(grid_group)
 
@@ -1925,6 +1985,7 @@ class ControlPanel(QtWidgets.QWidget):
         # Wire signals
         self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
         self.chk_labels.toggled.connect(self.view.set_show_labels)
+        self.chk_default_points.toggled.connect(self.view.set_show_default_points)
         self.list_points.currentRowChanged.connect(self._on_point_chosen)
         self.btn_add.clicked.connect(self._on_add)
         self.btn_update.clicked.connect(self._on_update)
@@ -1978,8 +2039,15 @@ class ControlPanel(QtWidgets.QWidget):
         if not hasattr(self, "list_points"):
             return
         self.list_points.clear()
-        for p in self.view.points:
-            self.list_points.addItem(p["name"])
+        
+        # Add default points (if visible)
+        if self.view.show_default_points:
+            for p in self.view.default_points:
+                self.list_points.addItem(f"📍 {p['name']}")  # Emoji to indicate default point
+        
+        # Add user points
+        for p in self.view.user_points:
+            self.list_points.addItem(f"🔹 {p['name']}")  # Emoji to indicate user point
         
         # Select the current point if there is one
         if 0 <= self.view.selected_index < len(self.view.points):
