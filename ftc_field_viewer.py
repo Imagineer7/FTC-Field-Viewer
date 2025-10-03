@@ -2,6 +2,8 @@
 # Interactive FTC field map viewer with grid and editable points.
 # See usage instructions at the bottom.
 
+__version__ = "1.0.0"
+
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect
 from PySide6.QtWidgets import QGraphicsEffect
