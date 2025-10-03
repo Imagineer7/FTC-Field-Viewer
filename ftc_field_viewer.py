@@ -103,6 +103,120 @@ class PointCreationDialog(QtWidgets.QDialog):
             "color": self.selected_color.name()
         }
 
+class LineCreationDialog(QtWidgets.QDialog):
+    """Dialog for creating new lines with two endpoints, name, and color"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create New Line")
+        self.setModal(True)
+        self.resize(400, 300)
+        
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Line name input
+        name_group = QtWidgets.QGroupBox("Line Name")
+        name_layout = QtWidgets.QVBoxLayout(name_group)
+        self.name_input = QtWidgets.QLineEdit()
+        self.name_input.setPlaceholderText("Enter line name...")
+        self.name_input.setText("New Line")
+        self.name_input.selectAll()
+        name_layout.addWidget(self.name_input)
+        layout.addWidget(name_group)
+        
+        # Endpoints group
+        endpoints_group = QtWidgets.QGroupBox("Line Endpoints")
+        endpoints_layout = QtWidgets.QGridLayout(endpoints_group)
+        
+        # Point 1
+        endpoints_layout.addWidget(QtWidgets.QLabel("Point 1:"), 0, 0)
+        endpoints_layout.addWidget(QtWidgets.QLabel("X (in):"), 1, 0)
+        self.x1_input = QtWidgets.QDoubleSpinBox()
+        self.x1_input.setRange(-HALF_FIELD, HALF_FIELD)
+        self.x1_input.setDecimals(3)
+        self.x1_input.setValue(0.0)
+        endpoints_layout.addWidget(self.x1_input, 1, 1)
+        
+        endpoints_layout.addWidget(QtWidgets.QLabel("Y (in):"), 2, 0)
+        self.y1_input = QtWidgets.QDoubleSpinBox()
+        self.y1_input.setRange(-HALF_FIELD, HALF_FIELD)
+        self.y1_input.setDecimals(3)
+        self.y1_input.setValue(0.0)
+        endpoints_layout.addWidget(self.y1_input, 2, 1)
+        
+        # Point 2
+        endpoints_layout.addWidget(QtWidgets.QLabel("Point 2:"), 0, 2)
+        endpoints_layout.addWidget(QtWidgets.QLabel("X (in):"), 1, 2)
+        self.x2_input = QtWidgets.QDoubleSpinBox()
+        self.x2_input.setRange(-HALF_FIELD, HALF_FIELD)
+        self.x2_input.setDecimals(3)
+        self.x2_input.setValue(10.0)
+        endpoints_layout.addWidget(self.x2_input, 1, 3)
+        
+        endpoints_layout.addWidget(QtWidgets.QLabel("Y (in):"), 2, 2)
+        self.y2_input = QtWidgets.QDoubleSpinBox()
+        self.y2_input.setRange(-HALF_FIELD, HALF_FIELD)
+        self.y2_input.setDecimals(3)
+        self.y2_input.setValue(10.0)
+        endpoints_layout.addWidget(self.y2_input, 2, 3)
+        
+        layout.addWidget(endpoints_group)
+        
+        # Color selection
+        color_group = QtWidgets.QGroupBox("Line Color")
+        color_layout = QtWidgets.QHBoxLayout(color_group)
+        
+        # Color preview button
+        self.color_button = QtWidgets.QPushButton()
+        self.color_button.setFixedSize(40, 30)
+        self.selected_color = QtGui.QColor("#4da6ff")  # Default blue
+        self.color_button.setStyleSheet(f"background-color: {self.selected_color.name()}; border: 2px solid #333;")
+        self.color_button.clicked.connect(self._choose_color)
+        
+        # Color label
+        color_label = QtWidgets.QLabel("Click to change color")
+        color_layout.addWidget(self.color_button)
+        color_layout.addWidget(color_label)
+        color_layout.addStretch()
+        layout.addWidget(color_group)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        
+        create_button = QtWidgets.QPushButton("Create Line")
+        create_button.setDefault(True)
+        create_button.clicked.connect(self.accept)
+        
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(create_button)
+        layout.addLayout(button_layout)
+        
+        # Focus on name input
+        self.name_input.setFocus()
+    
+    def _choose_color(self):
+        """Open color picker dialog"""
+        color = QtWidgets.QColorDialog.getColor(self.selected_color, self, "Choose Line Color")
+        if color.isValid():
+            self.selected_color = color
+            self.color_button.setStyleSheet(f"background-color: {color.name()}; border: 2px solid #333;")
+    
+    def get_line_data(self):
+        """Return the line data from the dialog"""
+        return {
+            "name": self.name_input.text().strip() or "New Line",
+            "x1": self.x1_input.value(),
+            "y1": self.y1_input.value(),
+            "x2": self.x2_input.value(),
+            "y2": self.y2_input.value(),
+            "color": self.selected_color.name()
+        }
+
 class VectorCreationDialog(QtWidgets.QDialog):
     """Dialog for creating new vectors with name, magnitude, direction, and color"""
     
@@ -308,6 +422,8 @@ class FieldView(QtWidgets.QGraphicsView):
     pointAdded = QtCore.Signal()              # emits when a new point is created
     vectorSelected = QtCore.Signal(int)       # emits index in vectors list or -1
     vectorAdded = QtCore.Signal()             # emits when a new vector is created
+    lineSelected = QtCore.Signal(int)         # emits index in lines list or -1
+    lineAdded = QtCore.Signal()               # emits when a new line is created
 
     def __init__(self, scene, image_pixmap, *args, **kwargs):
         super().__init__(scene, *args, **kwargs)
@@ -335,6 +451,11 @@ class FieldView(QtWidgets.QGraphicsView):
         self.vectors = []                   # list of dicts with name,x,y,magnitude,direction,color
         self.vector_items = []              # QGraphicsItem for vector arrows
         self.selected_vector_index = -1
+        
+        # Line management
+        self.lines = []                     # list of dicts with name,x1,y1,x2,y2,color
+        self.line_items = []                # QGraphicsItem for line segments
+        self.selected_line_index = -1
 
         # Cursor-following snap point
         self.cursor_point = None
@@ -396,6 +517,169 @@ class FieldView(QtWidgets.QGraphicsView):
         else:
             return 1.0  # 1 inch for very high zoom
 
+    # --- Line equation calculations ---
+    def calculate_line_equation(self, x1, y1, x2, y2):
+        """
+        Calculate line equation in standard form: Ax + By + C = 0
+        Returns (A, B, C) coefficients
+        """
+        # Handle vertical line case (x2 == x1)
+        if abs(x2 - x1) < 1e-10:
+            # Vertical line: x = x1, or x - x1 = 0, or 1*x + 0*y - x1 = 0
+            return (1.0, 0.0, -x1)
+        
+        # Handle horizontal line case (y2 == y1)
+        if abs(y2 - y1) < 1e-10:
+            # Horizontal line: y = y1, or 0*x + 1*y - y1 = 0
+            return (0.0, 1.0, -y1)
+        
+        # General case: convert from two-point form to standard form
+        # Two-point form: (y - y1)/(y2 - y1) = (x - x1)/(x2 - x1)
+        # Cross multiply: (y - y1)(x2 - x1) = (x - x1)(y2 - y1)
+        # Expand: y(x2 - x1) - y1(x2 - x1) = x(y2 - y1) - x1(y2 - y1)
+        # Rearrange: y(x2 - x1) - x(y2 - y1) = y1(x2 - x1) - x1(y2 - y1)
+        # Standard form: (y1 - y2)x + (x2 - x1)y + (x1(y2 - y1) - y1(x2 - x1)) = 0
+        
+        A = y1 - y2
+        B = x2 - x1
+        C = x1 * (y2 - y1) - y1 * (x2 - x1)
+        
+        return (A, B, C)
+    
+    def evaluate_line_equation(self, A, B, C, x, y):
+        """
+        Evaluate line equation Ax + By + C at point (x, y)
+        Returns: 
+        - 0 if point is on the line
+        - positive if point is on one side
+        - negative if point is on the other side
+        """
+        return A * x + B * y + C
+    
+    def get_line_equation_string(self, x1, y1, x2, y2, include_evaluation=True):
+        """
+        Get a formatted string representation of the line equation and evaluation function
+        """
+        A, B, C = self.calculate_line_equation(x1, y1, x2, y2)
+        
+        result = []
+        
+        # Zone inequality equations
+        result.append("Zone Boundary Equations:")
+        if abs(A) < 1e-10 and abs(B) < 1e-10:
+            result.append("Invalid line (both points are the same)")
+            return "\n".join(result)
+        elif abs(B) < 1e-10:  # Vertical line
+            x_val = -C/A
+            result.append(f"⁅x ≥ {x_val:.3f}⁆  (right side)")
+            result.append(f"⁅x ≤ {x_val:.3f}⁆  (left side)")
+        elif abs(A) < 1e-10:  # Horizontal line
+            y_val = -C/B
+            result.append(f"⁅y ≥ {y_val:.3f}⁆  (above line)")
+            result.append(f"⁅y ≤ {y_val:.3f}⁆  (below line)")
+        else:
+            # Convert to slope-intercept form for zone inequalities
+            m = -A/B
+            b = -C/B
+            
+            # Format the slope as a fraction if it's a simple ratio
+            if abs(m - round(m * 2) / 2) < 1e-6:  # Check if it's a half-integer
+                if abs(m - round(m)) < 1e-6:  # Whole number
+                    m_str = f"{int(round(m))}" if round(m) != 1 else ""
+                    if round(m) == -1:
+                        m_str = "-"
+                elif abs(m - 0.5) < 1e-6:
+                    m_str = "1/2 "
+                elif abs(m + 0.5) < 1e-6:
+                    m_str = "-1/2 "
+                elif abs(m - 1.5) < 1e-6:
+                    m_str = "3/2 "
+                elif abs(m + 1.5) < 1e-6:
+                    m_str = "-3/2 "
+                else:
+                    # Try to express as a simple fraction
+                    for denom in [2, 3, 4, 5, 6, 8]:
+                        if abs(m - round(m * denom) / denom) < 1e-6:
+                            num = int(round(m * denom))
+                            if num == denom:
+                                m_str = ""
+                            elif num == -denom:
+                                m_str = "-"
+                            else:
+                                m_str = f"{num}/{denom} " if abs(num) != 1 else ("" if num == 1 else "-")
+                            break
+                    else:
+                        m_str = f"{m:.3f} "
+            else:
+                m_str = f"{m:.3f} " if abs(m - 1) > 1e-6 else ""
+                if abs(m + 1) < 1e-6:
+                    m_str = "-"
+            
+            # Format the y-intercept
+            if abs(b) < 1e-6:
+                b_str = ""
+            elif b > 0:
+                b_str = f" + {b:.3f}" if abs(b - round(b)) > 1e-6 else f" + {int(round(b))}"
+            else:
+                b_str = f" - {abs(b):.3f}" if abs(b - round(b)) > 1e-6 else f" - {int(round(abs(b)))}"
+            
+            # Create the inequality equations
+            if m_str == "":
+                if b_str == "":
+                    pos_eq = "⁅y ≥ x⁆"
+                    neg_eq = "⁅y ≤ x⁆"
+                else:
+                    pos_eq = f"⁅y ≥ x{b_str}⁆"
+                    neg_eq = f"⁅y ≤ x{b_str}⁆"
+            elif m_str == "-":
+                if b_str == "":
+                    pos_eq = "⁅y ≥ -x⁆"
+                    neg_eq = "⁅y ≤ -x⁆"
+                else:
+                    pos_eq = f"⁅y ≥ -x{b_str}⁆"
+                    neg_eq = f"⁅y ≤ -x{b_str}⁆"
+            else:
+                if b_str == "":
+                    pos_eq = f"⁅y ≥ {m_str}x⁆"
+                    neg_eq = f"⁅y ≤ {m_str}x⁆"
+                else:
+                    pos_eq = f"⁅y ≥ {m_str}x{b_str}⁆"
+                    neg_eq = f"⁅y ≤ {m_str}x{b_str}⁆"
+            
+            result.append(f"{pos_eq}  (above/positive side)")
+            result.append(f"{neg_eq}  (below/negative side)")
+        
+        # Standard form for reference
+        result.append("")
+        result.append("Standard Form (for reference):")
+        result.append(f"{A:.3f}x + {B:.3f}y + {C:.3f} = 0")
+        
+        if include_evaluation:
+            result.append("")
+            result.append("Robot Code Evaluation Function:")
+            result.append("// Returns: 0 = on line, >0 = above/positive, <0 = below/negative")
+            result.append(f"double evaluateLine(double x, double y) {{")
+            result.append(f"    return {A:.3f} * x + {B:.3f} * y + {C:.3f};")
+            result.append(f"}}")
+            result.append("")
+            result.append("Zone Check Examples:")
+            if abs(B) < 1e-10:  # Vertical line
+                result.append("if (evaluateLine(robotX, robotY) > 0) {")
+                result.append("    // Robot is on the right side of the line")
+                result.append("}")
+                result.append("if (evaluateLine(robotX, robotY) < 0) {")
+                result.append("    // Robot is on the left side of the line")
+                result.append("}")
+            else:
+                result.append("if (evaluateLine(robotX, robotY) > 0) {")
+                result.append("    // Robot is above the line")
+                result.append("}")
+                result.append("if (evaluateLine(robotX, robotY) < 0) {")
+                result.append("    // Robot is below the line")
+                result.append("}")
+        
+        return "\n".join(result)
+
     # --- Grid and points drawing ---
     def _clear_overlays(self):
         # Remove all but image
@@ -409,6 +693,7 @@ class FieldView(QtWidgets.QGraphicsView):
         self._draw_grid()
         self._draw_points()
         self._draw_vectors()
+        self._draw_lines()
         self._draw_cursor_point()
 
     def _draw_grid(self):
@@ -653,6 +938,147 @@ class FieldView(QtWidgets.QGraphicsView):
                 self.vector_items.append(background)
                 self.vector_items.append(label)
     
+    def _draw_lines(self):
+        """Draw lines as line segments between two points"""
+        # Clear existing line items from scene
+        for item in self.line_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
+        self.line_items.clear()
+        
+        for idx, line in enumerate(self.lines):
+            color = QtGui.QColor(line.get("color", "#4da6ff"))
+            
+            # Convert field coordinates to scene coordinates
+            pos1 = self.field_to_scene(line["x1"], line["y1"])
+            pos2 = self.field_to_scene(line["x2"], line["y2"])
+            
+            # Draw line segment
+            line_width = 4.0 if idx == self.selected_line_index else 3.0
+            pen = QtGui.QPen(color)
+            pen.setWidthF(line_width)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            
+            line_segment = self.scene().addLine(pos1.x(), pos1.y(), pos2.x(), pos2.y(), pen)
+            line_segment.setZValue(3)  # Behind vectors but above grid
+            self.line_items.append(line_segment)
+            
+            # Draw endpoint markers
+            endpoint_radius = 6.0 if idx == self.selected_line_index else 4.0
+            endpoint_pen = QtGui.QPen(color.darker(120))
+            endpoint_pen.setWidthF(2.0)
+            endpoint_brush = QtGui.QBrush(color.lighter(150))
+            
+            # Point 1 marker
+            endpoint1 = self.scene().addEllipse(
+                pos1.x() - endpoint_radius/2, pos1.y() - endpoint_radius/2,
+                endpoint_radius, endpoint_radius, endpoint_pen, endpoint_brush
+            )
+            endpoint1.setZValue(4)
+            self.line_items.append(endpoint1)
+            
+            # Point 2 marker
+            endpoint2 = self.scene().addEllipse(
+                pos2.x() - endpoint_radius/2, pos2.y() - endpoint_radius/2,
+                endpoint_radius, endpoint_radius, endpoint_pen, endpoint_brush
+            )
+            endpoint2.setZValue(4)
+            self.line_items.append(endpoint2)
+            
+            # Add line label if labels are enabled
+            if self.show_labels:
+                # Calculate line equation for display
+                A, B, C = self.calculate_line_equation(line["x1"], line["y1"], line["x2"], line["y2"])
+                
+                # Format equation string in zone inequality format
+                if abs(B) < 1e-10:  # Vertical line
+                    equation_str = f"x = {-C/A:.2f}"
+                elif abs(A) < 1e-10:  # Horizontal line
+                    equation_str = f"y = {-C/B:.2f}"
+                else:
+                    # Convert to slope-intercept form for zone display
+                    m = -A/B
+                    b = -C/B
+                    
+                    # Format slope as fraction if simple
+                    if abs(m - 0.5) < 1e-6:
+                        m_str = "1/2"
+                    elif abs(m + 0.5) < 1e-6:
+                        m_str = "-1/2"
+                    elif abs(m - round(m)) < 1e-6:
+                        m_val = int(round(m))
+                        m_str = str(m_val) if m_val != 1 else ""
+                        if m_val == -1:
+                            m_str = "-"
+                    else:
+                        m_str = f"{m:.2f}"
+                    
+                    # Format equation
+                    if abs(b) < 1e-10:
+                        if m_str == "":
+                            equation_str = "⁅y ≥ x⁆"
+                        elif m_str == "-":
+                            equation_str = "⁅y ≥ -x⁆"
+                        else:
+                            equation_str = f"⁅y ≥ {m_str}x⁆"
+                    else:
+                        b_str = f" + {b:.2f}" if b >= 0 else f" - {abs(b):.2f}"
+                        if abs(b - round(b)) < 1e-6:
+                            b_str = f" + {int(round(b))}" if b >= 0 else f" - {int(round(abs(b)))}"
+                        
+                        if m_str == "":
+                            equation_str = f"⁅y ≥ x{b_str}⁆"
+                        elif m_str == "-":
+                            equation_str = f"⁅y ≥ -x{b_str}⁆"
+                        else:
+                            equation_str = f"⁅y ≥ {m_str}x{b_str}⁆"
+                
+                label_text = f"{line['name']}\n{equation_str}"
+                label = self.scene().addText(label_text)
+                
+                # Set font and color
+                font = QtGui.QFont("Arial", 10, QtGui.QFont.Weight.Bold)
+                label.setFont(font)
+                label.setDefaultTextColor(color.lighter(150))
+                
+                # Position label at the midpoint of the line, offset slightly
+                mid_x = (pos1.x() + pos2.x()) / 2
+                mid_y = (pos1.y() + pos2.y()) / 2
+                
+                # Calculate perpendicular offset for label positioning
+                dx = pos2.x() - pos1.x()
+                dy = pos2.y() - pos1.y()
+                length = math.sqrt(dx*dx + dy*dy)
+                
+                if length > 0:
+                    # Perpendicular direction (rotated 90 degrees)
+                    perp_x = -dy / length
+                    perp_y = dx / length
+                    offset_distance = 25
+                    label_x = mid_x + perp_x * offset_distance
+                    label_y = mid_y + perp_y * offset_distance
+                else:
+                    label_x = mid_x
+                    label_y = mid_y - 20
+                
+                label.setPos(label_x, label_y)
+                label.setZValue(6)
+                
+                # Create background for label
+                text_rect = label.boundingRect()
+                padding = 3
+                bg_rect = text_rect.adjusted(-padding, -padding, padding, padding)
+                
+                background = self.scene().addRect(
+                    bg_rect.translated(label.pos()),
+                    QtGui.QPen(color.darker(120)),
+                    QtGui.QBrush(QtGui.QColor(0, 0, 0, 180))
+                )
+                background.setZValue(5)
+                
+                self.line_items.append(background)
+                self.line_items.append(label)
+
     def _draw_cursor_point(self):
         """Draw the cursor-following snap point"""
         if self.cursor_point and self.cursor_point.scene() == self.scene():
@@ -734,6 +1160,10 @@ class FieldView(QtWidgets.QGraphicsView):
         create_vector_action = menu.addAction("Create Vector Here")
         create_vector_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowRight))
         
+        # Add line creation action
+        create_line_action = menu.addAction("Create Line...")
+        create_line_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOkButton))
+        
         # Add separator and coordinates info
         menu.addSeparator()
         coord_text = f"Position: ({self.cursor_field_pos[0]:.1f}, {self.cursor_field_pos[1]:.1f}) in"
@@ -743,6 +1173,7 @@ class FieldView(QtWidgets.QGraphicsView):
         # Connect actions
         create_point_action.triggered.connect(self._create_point_at_cursor)
         create_vector_action.triggered.connect(self._create_vector_at_cursor)
+        create_line_action.triggered.connect(self._create_line)
         
         # Show menu and handle closing
         action = menu.exec(global_pos)
@@ -809,6 +1240,42 @@ class FieldView(QtWidgets.QGraphicsView):
             self._rebuild_overlays()
             self.vectorAdded.emit()
             self.vectorSelected.emit(self.selected_vector_index)
+    
+    def _create_line(self):
+        """Create a new line using a dialog"""
+        # Show line creation dialog
+        dialog = LineCreationDialog(self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            # Get line data from dialog
+            new_line = dialog.get_line_data()
+            
+            # Validate that the two points are different
+            if (abs(new_line["x1"] - new_line["x2"]) < 1e-6 and 
+                abs(new_line["y1"] - new_line["y2"]) < 1e-6):
+                QtWidgets.QMessageBox.warning(
+                    self, "Invalid Line", 
+                    "The two endpoints cannot be the same point. Please enter different coordinates."
+                )
+                return
+            
+            # Ensure unique name
+            existing_names = {line["name"] for line in self.lines}
+            original_name = new_line["name"]
+            counter = 1
+            while new_line["name"] in existing_names:
+                new_line["name"] = f"{original_name} ({counter})"
+                counter += 1
+            
+            # Add to lines list
+            self.lines.append(new_line)
+            
+            # Select the new line
+            self.selected_line_index = len(self.lines) - 1
+            
+            # Rebuild display and emit signals
+            self._rebuild_overlays()
+            self.lineAdded.emit()
+            self.lineSelected.emit(self.selected_line_index)
 
     # --- Public API for controls ---
     def set_grid_opacity(self, op: float):
@@ -870,6 +1337,38 @@ class FieldView(QtWidgets.QGraphicsView):
             if magnitude is not None: v["magnitude"] = float(magnitude)
             if direction is not None: v["direction"] = float(direction)
             if color is not None: v["color"] = color
+            self._rebuild_overlays()
+
+    def add_line(self, name, x1, y1, x2, y2, color="#4da6ff"):
+        """Add a new line to the field"""
+        self.lines.append({
+            "name": name,
+            "x1": float(x1),
+            "y1": float(y1), 
+            "x2": float(x2),
+            "y2": float(y2),
+            "color": color
+        })
+        self.selected_line_index = len(self.lines) - 1
+        self._rebuild_overlays()
+
+    def remove_selected_line(self):
+        """Remove the currently selected line"""
+        if 0 <= self.selected_line_index < len(self.lines):
+            del self.lines[self.selected_line_index]
+            self.selected_line_index = -1
+            self._rebuild_overlays()
+
+    def update_selected_line(self, name=None, x1=None, y1=None, x2=None, y2=None, color=None):
+        """Update the currently selected line"""
+        if 0 <= self.selected_line_index < len(self.lines):
+            line = self.lines[self.selected_line_index]
+            if name is not None: line["name"] = name
+            if x1 is not None: line["x1"] = float(x1)
+            if y1 is not None: line["y1"] = float(y1)
+            if x2 is not None: line["x2"] = float(x2)
+            if y2 is not None: line["y2"] = float(y2)
+            if color is not None: line["color"] = color
             self._rebuild_overlays()
 
     def save_points(self, path):
@@ -1017,6 +1516,68 @@ class ControlPanel(QtWidgets.QWidget):
 
         layout.addWidget(vec_group)
 
+        # Lines list + editor
+        lines_group = QtWidgets.QGroupBox("Lines")
+        lg = QtWidgets.QGridLayout(lines_group)
+
+        self.list_lines = QtWidgets.QListWidget()
+        self._refresh_lines_list()
+        lg.addWidget(self.list_lines, 0, 0, 8, 1)
+
+        lg.addWidget(QtWidgets.QLabel("Name"), 0, 1)
+        self.ed_line_name = QtWidgets.QLineEdit()
+        lg.addWidget(self.ed_line_name, 0, 2)
+
+        lg.addWidget(QtWidgets.QLabel("Point 1 X (in)"), 1, 1)
+        self.ed_line_x1 = QtWidgets.QDoubleSpinBox()
+        self.ed_line_x1.setRange(-HALF_FIELD, HALF_FIELD)
+        self.ed_line_x1.setDecimals(3)
+        lg.addWidget(self.ed_line_x1, 1, 2)
+
+        lg.addWidget(QtWidgets.QLabel("Point 1 Y (in)"), 2, 1)
+        self.ed_line_y1 = QtWidgets.QDoubleSpinBox()
+        self.ed_line_y1.setRange(-HALF_FIELD, HALF_FIELD)
+        self.ed_line_y1.setDecimals(3)
+        lg.addWidget(self.ed_line_y1, 2, 2)
+
+        lg.addWidget(QtWidgets.QLabel("Point 2 X (in)"), 3, 1)
+        self.ed_line_x2 = QtWidgets.QDoubleSpinBox()
+        self.ed_line_x2.setRange(-HALF_FIELD, HALF_FIELD)
+        self.ed_line_x2.setDecimals(3)
+        lg.addWidget(self.ed_line_x2, 3, 2)
+
+        lg.addWidget(QtWidgets.QLabel("Point 2 Y (in)"), 4, 1)
+        self.ed_line_y2 = QtWidgets.QDoubleSpinBox()
+        self.ed_line_y2.setRange(-HALF_FIELD, HALF_FIELD)
+        self.ed_line_y2.setDecimals(3)
+        lg.addWidget(self.ed_line_y2, 4, 2)
+
+        lg.addWidget(QtWidgets.QLabel("Color"), 5, 1)
+        self.ed_line_color = QtWidgets.QLineEdit("#4da6ff")
+        lg.addWidget(self.ed_line_color, 5, 2)
+
+        # Line equation display
+        lg.addWidget(QtWidgets.QLabel("Equation"), 6, 1)
+        equation_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_show_equation = QtWidgets.QPushButton("Show Equation")
+        self.btn_show_equation.clicked.connect(self._show_line_equation)
+        self.btn_test_zone = QtWidgets.QPushButton("Test Zone")
+        self.btn_test_zone.clicked.connect(self._test_line_zone)
+        equation_btn_layout.addWidget(self.btn_show_equation)
+        equation_btn_layout.addWidget(self.btn_test_zone)
+        lg.addLayout(equation_btn_layout, 6, 2)
+
+        line_btn_row = QtWidgets.QHBoxLayout()
+        self.btn_line_add = QtWidgets.QPushButton("Add")
+        self.btn_line_update = QtWidgets.QPushButton("Update")
+        self.btn_line_remove = QtWidgets.QPushButton("Remove")
+        line_btn_row.addWidget(self.btn_line_add)
+        line_btn_row.addWidget(self.btn_line_update)
+        line_btn_row.addWidget(self.btn_line_remove)
+        lg.addLayout(line_btn_row, 7, 1, 1, 2)
+
+        layout.addWidget(lines_group)
+
         # Save/Load/Export
         io_group = QtWidgets.QGroupBox("I/O")
         ig = QtWidgets.QHBoxLayout(io_group)
@@ -1031,8 +1592,9 @@ class ControlPanel(QtWidgets.QWidget):
         il = QtWidgets.QVBoxLayout(info)
         lbl = QtWidgets.QLabel(
             "• Pan: click + drag  • Zoom: mouse wheel\n"
-            "• Click a point to select it\n"
-            "• Use Add/Update/Remove to manage points\n"
+            "• Right-click: create points, vectors, or lines\n"
+            "• Click list items to select and edit\n"
+            "• Lines: Show equation & test zones for robot code\n"
             "• Grid spacing is in inches (bold every 6)"
         )
         lbl.setWordWrap(True)
@@ -1056,12 +1618,20 @@ class ControlPanel(QtWidgets.QWidget):
         self.view.pointAdded.connect(self._refresh_points_list)
         self.view.vectorSelected.connect(self._on_vector_selected)
         self.view.vectorAdded.connect(self._refresh_vectors_list)
+        self.view.lineSelected.connect(self._on_line_selected)
+        self.view.lineAdded.connect(self._refresh_lines_list)
         
         # Vector button connections
         self.list_vectors.currentRowChanged.connect(self._on_vector_chosen)
         self.btn_vec_add.clicked.connect(self._on_vec_add)
         self.btn_vec_update.clicked.connect(self._on_vec_update)
         self.btn_vec_remove.clicked.connect(self._on_vec_remove)
+        
+        # Line button connections
+        self.list_lines.currentRowChanged.connect(self._on_line_chosen)
+        self.btn_line_add.clicked.connect(self._on_line_add)
+        self.btn_line_update.clicked.connect(self._on_line_update)
+        self.btn_line_remove.clicked.connect(self._on_line_remove)
 
     def _on_cursor_move(self, x, y):
         self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
@@ -1148,6 +1718,294 @@ class ControlPanel(QtWidgets.QWidget):
         self.view.remove_selected_vector()
         self._refresh_vectors_list()
         self._populate_vector_editor_from_view()
+    
+    def _refresh_lines_list(self):
+        if not hasattr(self, "list_lines"):
+            return
+        self.list_lines.clear()
+        for line in self.view.lines:
+            self.list_lines.addItem(line["name"])
+        
+        # Select the current line if there is one
+        if 0 <= self.view.selected_line_index < len(self.view.lines):
+            self.list_lines.setCurrentRow(self.view.selected_line_index)
+            self._populate_line_editor_from_view()
+    
+    def _on_line_selected(self, idx):
+        self.list_lines.setCurrentRow(idx)
+        self._populate_line_editor_from_view()
+    
+    def _on_line_chosen(self, row):
+        if 0 <= row < len(self.view.lines):
+            self.view.selected_line_index = row
+            self.view._rebuild_overlays()
+            self._populate_line_editor_from_view()
+    
+    def _populate_line_editor_from_view(self):
+        idx = self.list_lines.currentRow()
+        if 0 <= idx < len(self.view.lines):
+            line = self.view.lines[idx]
+            self.ed_line_name.setText(line["name"])
+            self.ed_line_x1.setValue(line["x1"])
+            self.ed_line_y1.setValue(line["y1"])
+            self.ed_line_x2.setValue(line["x2"])
+            self.ed_line_y2.setValue(line["y2"])
+            self.ed_line_color.setText(line.get("color", "#4da6ff"))
+        else:
+            self.ed_line_name.clear()
+            self.ed_line_x1.setValue(0.0)
+            self.ed_line_y1.setValue(0.0)
+            self.ed_line_x2.setValue(10.0)
+            self.ed_line_y2.setValue(10.0)
+            self.ed_line_color.setText("#4da6ff")
+    
+    def _on_line_add(self):
+        name = self.ed_line_name.text().strip() or "New Line"
+        x1 = self.ed_line_x1.value()
+        y1 = self.ed_line_y1.value()
+        x2 = self.ed_line_x2.value()
+        y2 = self.ed_line_y2.value()
+        color = self.ed_line_color.text().strip() or "#4da6ff"
+        
+        # Validate that the two points are different
+        if abs(x1 - x2) < 1e-6 and abs(y1 - y2) < 1e-6:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Line", 
+                "The two endpoints cannot be the same point. Please enter different coordinates."
+            )
+            return
+        
+        self.view.add_line(name, x1, y1, x2, y2, color)
+        self._refresh_lines_list()
+        self.list_lines.setCurrentRow(self.view.selected_line_index)
+    
+    def _on_line_update(self):
+        name = self.ed_line_name.text().strip() or None
+        x1 = self.ed_line_x1.value()
+        y1 = self.ed_line_y1.value()
+        x2 = self.ed_line_x2.value()
+        y2 = self.ed_line_y2.value()
+        color = self.ed_line_color.text().strip() or None
+        
+        # Validate that the two points are different
+        if abs(x1 - x2) < 1e-6 and abs(y1 - y2) < 1e-6:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Line", 
+                "The two endpoints cannot be the same point. Please enter different coordinates."
+            )
+            return
+        
+        self.view.update_selected_line(name, x1, y1, x2, y2, color)
+        self._refresh_lines_list()
+        self.list_lines.setCurrentRow(self.view.selected_line_index)
+    
+    def _on_line_remove(self):
+        self.view.remove_selected_line()
+        self._refresh_lines_list()
+        self._populate_line_editor_from_view()
+    
+    def _show_line_equation(self):
+        """Show line equation and evaluation code in a dialog"""
+        idx = self.list_lines.currentRow()
+        if 0 <= idx < len(self.view.lines):
+            line = self.view.lines[idx]
+            equation_text = self.view.get_line_equation_string(
+                line["x1"], line["y1"], line["x2"], line["y2"]
+            )
+            
+            # Create dialog to show equation
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle(f"Line Equation: {line['name']}")
+            dialog.setModal(True)
+            dialog.resize(500, 400)
+            
+            layout = QtWidgets.QVBoxLayout(dialog)
+            
+            # Text area with equation
+            text_area = QtWidgets.QTextEdit()
+            text_area.setPlainText(equation_text)
+            text_area.setReadOnly(True)
+            text_area.setFont(QtGui.QFont("Courier New", 10))
+            layout.addWidget(text_area)
+            
+            # Close button
+            close_button = QtWidgets.QPushButton("Close")
+            close_button.clicked.connect(dialog.accept)
+            layout.addWidget(close_button)
+            
+            dialog.exec()
+        else:
+            QtWidgets.QMessageBox.information(self, "No Line Selected", 
+                                            "Please select a line to show its equation.")
+    
+    def _test_line_zone(self):
+        """Test which side of the line a point is on"""
+        idx = self.list_lines.currentRow()
+        if 0 <= idx < len(self.view.lines):
+            line = self.view.lines[idx]
+            
+            # Create test dialog
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle(f"Test Zone for Line: {line['name']}")
+            dialog.setModal(True)
+            dialog.resize(450, 350)
+            
+            layout = QtWidgets.QVBoxLayout(dialog)
+            
+            # Line info
+            info_group = QtWidgets.QGroupBox("Line Information")
+            info_layout = QtWidgets.QVBoxLayout(info_group)
+            info_text = f"Line: {line['name']}\n"
+            info_text += f"Point 1: ({line['x1']:.3f}, {line['y1']:.3f})\n"
+            info_text += f"Point 2: ({line['x2']:.3f}, {line['y2']:.3f})"
+            info_label = QtWidgets.QLabel(info_text)
+            info_layout.addWidget(info_label)
+            layout.addWidget(info_group)
+            
+            # Test point input
+            test_group = QtWidgets.QGroupBox("Test Point")
+            test_layout = QtWidgets.QGridLayout(test_group)
+            
+            test_layout.addWidget(QtWidgets.QLabel("X (in):"), 0, 0)
+            test_x = QtWidgets.QDoubleSpinBox()
+            test_x.setRange(-HALF_FIELD, HALF_FIELD)
+            test_x.setDecimals(3)
+            test_x.setValue(0.0)
+            test_layout.addWidget(test_x, 0, 1)
+            
+            test_layout.addWidget(QtWidgets.QLabel("Y (in):"), 1, 0)
+            test_y = QtWidgets.QDoubleSpinBox()
+            test_y.setRange(-HALF_FIELD, HALF_FIELD)
+            test_y.setDecimals(3)
+            test_y.setValue(0.0)
+            test_layout.addWidget(test_y, 1, 1)
+            
+            test_button = QtWidgets.QPushButton("Test Point")
+            test_layout.addWidget(test_button, 2, 0, 1, 2)
+            
+            layout.addWidget(test_group)
+            
+            # Results display
+            results_group = QtWidgets.QGroupBox("Test Results")
+            results_layout = QtWidgets.QVBoxLayout(results_group)
+            results_text = QtWidgets.QTextEdit()
+            results_text.setReadOnly(True)
+            results_text.setMaximumHeight(120)
+            results_layout.addWidget(results_text)
+            layout.addWidget(results_group)
+            
+            # Get line equation
+            A, B, C = self.view.calculate_line_equation(line["x1"], line["y1"], line["x2"], line["y2"])
+            
+            def test_point():
+                x = test_x.value()
+                y = test_y.value()
+                result = self.view.evaluate_line_equation(A, B, C, x, y)
+                
+                result_text = f"Test Point: ({x:.3f}, {y:.3f})\n"
+                result_text += f"Equation Result: {result:.6f}\n\n"
+                
+                if abs(result) < 1e-6:
+                    result_text += "✓ Point is ON the line\n"
+                elif result > 0:
+                    if abs(B) < 1e-10:  # Vertical line
+                        result_text += "✓ Point is on the RIGHT side\n"
+                        result_text += f"  Zone: ⁅x ≥ {-C/A:.3f}⁆\n"
+                        result_text += "  Code: if (evaluateLine(x, y) > 0) { /* right side */ }\n"
+                    else:
+                        result_text += "✓ Point is ABOVE the line\n"
+                        # Show zone inequality
+                        m = -A/B
+                        b = -C/B
+                        if abs(m - 0.5) < 1e-6:
+                            m_str = "1/2 "
+                        elif abs(m + 0.5) < 1e-6:
+                            m_str = "-1/2 "
+                        elif abs(m - round(m)) < 1e-6:
+                            m_val = int(round(m))
+                            m_str = f"{m_val} " if m_val != 1 else ""
+                            if m_val == -1:
+                                m_str = "-"
+                        else:
+                            m_str = f"{m:.3f} "
+                        
+                        if abs(b) < 1e-6:
+                            zone_eq = f"⁅y ≥ {m_str}x⁆" if m_str != "" else "⁅y ≥ x⁆"
+                            if m_str == "-":
+                                zone_eq = "⁅y ≥ -x⁆"
+                        else:
+                            b_str = f" + {b:.3f}" if b >= 0 else f" - {abs(b):.3f}"
+                            zone_eq = f"⁅y ≥ {m_str}x{b_str}⁆" if m_str != "" else f"⁅y ≥ x{b_str}⁆"
+                            if m_str == "-":
+                                zone_eq = f"⁅y ≥ -x{b_str}⁆"
+                        
+                        result_text += f"  Zone: {zone_eq}\n"
+                        result_text += "  Code: if (evaluateLine(x, y) > 0) { /* above line */ }\n"
+                else:
+                    if abs(B) < 1e-10:  # Vertical line
+                        result_text += "✓ Point is on the LEFT side\n"
+                        result_text += f"  Zone: ⁅x ≤ {-C/A:.3f}⁆\n"
+                        result_text += "  Code: if (evaluateLine(x, y) < 0) { /* left side */ }\n"
+                    else:
+                        result_text += "✓ Point is BELOW the line\n"
+                        # Show zone inequality
+                        m = -A/B
+                        b = -C/B
+                        if abs(m - 0.5) < 1e-6:
+                            m_str = "1/2 "
+                        elif abs(m + 0.5) < 1e-6:
+                            m_str = "-1/2 "
+                        elif abs(m - round(m)) < 1e-6:
+                            m_val = int(round(m))
+                            m_str = f"{m_val} " if m_val != 1 else ""
+                            if m_val == -1:
+                                m_str = "-"
+                        else:
+                            m_str = f"{m:.3f} "
+                        
+                        if abs(b) < 1e-6:
+                            zone_eq = f"⁅y ≤ {m_str}x⁆" if m_str != "" else "⁅y ≤ x⁆"
+                            if m_str == "-":
+                                zone_eq = "⁅y ≤ -x⁆"
+                        else:
+                            b_str = f" + {b:.3f}" if b >= 0 else f" - {abs(b):.3f}"
+                            zone_eq = f"⁅y ≤ {m_str}x{b_str}⁆" if m_str != "" else f"⁅y ≤ x{b_str}⁆"
+                            if m_str == "-":
+                                zone_eq = f"⁅y ≤ -x{b_str}⁆"
+                        
+                        result_text += f"  Zone: {zone_eq}\n"
+                        result_text += "  Code: if (evaluateLine(x, y) < 0) { /* below line */ }\n"
+                
+                results_text.setPlainText(result_text)
+            
+            test_button.clicked.connect(test_point)
+            
+            # Robot code section
+            code_group = QtWidgets.QGroupBox("Robot Code Function")
+            code_layout = QtWidgets.QVBoxLayout(code_group)
+            code_text = QtWidgets.QTextEdit()
+            code_text.setReadOnly(True)
+            code_text.setMaximumHeight(80)
+            code_function = f"double evaluateLine(double x, double y) {{\n"
+            code_function += f"    return {A:.6f} * x + {B:.6f} * y + {C:.6f};\n"
+            code_function += f"}}"
+            code_text.setPlainText(code_function)
+            code_text.setFont(QtGui.QFont("Courier New", 9))
+            code_layout.addWidget(code_text)
+            layout.addWidget(code_group)
+            
+            # Close button
+            close_button = QtWidgets.QPushButton("Close")
+            close_button.clicked.connect(dialog.accept)
+            layout.addWidget(close_button)
+            
+            # Test the line endpoints initially
+            test_point()
+            
+            dialog.exec()
+        else:
+            QtWidgets.QMessageBox.information(self, "No Line Selected", 
+                                            "Please select a line to test its zone.")
 
     def _populate_editor_from_view(self):
         idx = self.list_points.currentRow()
@@ -1315,8 +2173,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "FTC Field Map Viewer – DECODE\n\n"
             "• Drag to pan, wheel to zoom\n"
             "• Grid spacing adjustable (inches)\n"
-            "• Add/remove/rename points, save/load JSON\n"
-            "• Export snapshot as PNG\n"
+            "• Add/remove/rename points, vectors, and lines\n"
+            "• Line equations for robot zone creation\n"
+            "• Zone testing with arbitrary points\n"
+            "• Save/load JSON, export snapshot as PNG\n"
             "Dark theme, smooth antialiased rendering.\n"
         )
 
