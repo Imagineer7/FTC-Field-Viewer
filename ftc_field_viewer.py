@@ -4,19 +4,25 @@
 # Version only changes the first number if it is a big feature update. Otherwise for small feature(s)
 # changes the second number changes and the last number is for bug fixes.
 
-__version__ = "1.2.0"
+__version__ = "1.3.1"
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QSettings, QStandardPaths
 from PySide6.QtWidgets import QGraphicsEffect
 import json
 import math
 import os
 import sys
 import argparse
+from typing import List, Optional
 
 FIELD_SIZE_IN = 141.0
 HALF_FIELD = FIELD_SIZE_IN / 2.0
+
+# Settings for storing user preferences
+SETTINGS_ORG = "FTC-Tools"
+SETTINGS_APP = "FTC-Field-Viewer"
+MAX_RECENT_FILES = 10
 
 def load_default_points_for_image(image_path: str) -> list:
     """Load default points from JSON file based on image filename"""
@@ -462,6 +468,13 @@ class FieldView(QtWidgets.QGraphicsView):
         self.setDragMode(QtWidgets.QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        
+        # Enable drag and drop
+        self.setAcceptDrops(True)
+        
+        # Point dragging state
+        self.dragging_point = False
+        self.drag_point_index = -1
 
         self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
         self.scene().addItem(self.image_item)
@@ -497,6 +510,7 @@ class FieldView(QtWidgets.QGraphicsView):
         self.measurement_points = []        # Points selected for current measurement
         self.measurement_items = []         # Visual items for measurements
         self.show_pixel_coords = False     # Toggle between field and pixel coordinates
+        self.measurement_snap_to_grid = True  # Whether measurements snap to grid
         
         # Cursor-following snap point
         self.cursor_point = None
@@ -1198,31 +1212,16 @@ class FieldView(QtWidgets.QGraphicsView):
             # Redraw grid with new zoom level
             self._rebuild_overlays()
 
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent):
-        scene_pos = self.mapToScene(event.position().toPoint())
-        x_in, y_in = self.scene_to_field(scene_pos)
-        
-        # Update cursor point position (only if menu is not open)
-        if not self.menu_open:
-            # Check if Shift key is pressed to disable snapping
-            modifiers = QtWidgets.QApplication.keyboardModifiers()
-            if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
-                # No snapping when shift is pressed
-                self.cursor_field_pos = (x_in, y_in)
-            else:
-                # Use the same grid spacing as the visual grid for cursor snapping
-                snap_resolution = self._get_current_grid_spacing()
-                snapped_x, snapped_y = self.snap_to_grid(x_in, y_in, snap_resolution)
-                self.cursor_field_pos = (snapped_x, snapped_y)
-            self._draw_cursor_point()
-        
-        self.cursorMoved.emit(x_in, y_in)
-        super().mouseMoveEvent(event)
-
     def mousePressEvent(self, event: QtGui.QMouseEvent):
         if event.button() == QtCore.Qt.MouseButton.LeftButton and self.measurement_mode:
             # Handle measurement tool clicks
-            field_x, field_y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
+            scene_pos = self.mapToScene(event.position().toPoint())
+            field_x, field_y = self.scene_to_field(scene_pos)
+            
+            # Apply snapping if enabled and Shift is not held
+            if self.measurement_snap_to_grid and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier):
+                snap_resolution = self._get_current_grid_spacing()
+                field_x, field_y = self.snap_to_grid(field_x, field_y, snap_resolution)
             
             if self.measurement_tool == "distance":
                 self.add_measurement_point(field_x, field_y)
@@ -1237,6 +1236,23 @@ class FieldView(QtWidgets.QGraphicsView):
             elif self.measurement_tool == "area":
                 self.add_measurement_point(field_x, field_y)
                 # Area measurement continues until user switches tools or disables measurement mode
+        
+        elif event.button() == QtCore.Qt.MouseButton.LeftButton and not self.measurement_mode:
+            # Check if we're clicking on a point for dragging
+            field_x, field_y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
+            point_index = self._find_point_at_position(field_x, field_y)
+            
+            if point_index >= 0:
+                # Start dragging point
+                self.dragging_point = True
+                self.drag_point_index = point_index
+                self.selected_index = point_index
+                self.setDragMode(QtWidgets.QGraphicsView.DragMode.NoDrag)  # Disable view panning while dragging point
+                self._rebuild_overlays()
+                self.pointSelected.emit(point_index)
+            else:
+                # Normal view interaction
+                self.setDragMode(QtWidgets.QGraphicsView.DragMode.ScrollHandDrag)
                 
         elif event.button() == QtCore.Qt.MouseButton.RightButton and not self.measurement_mode:
             # Show context menu for point creation (only when not in measurement mode)
@@ -1246,6 +1262,70 @@ class FieldView(QtWidgets.QGraphicsView):
             self.clear_current_measurement()
             
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent):
+        # Handle point dragging
+        if self.dragging_point and self.drag_point_index >= 0:
+            field_x, field_y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
+            
+            # Update point position
+            if self.drag_point_index < len(self.points):
+                self.points[self.drag_point_index]['x'] = field_x
+                self.points[self.drag_point_index]['y'] = field_y
+                self._rebuild_overlays()
+            
+            self.cursorMoved.emit(field_x, field_y)
+            return  # Don't call super() to prevent view panning during point drag
+            
+        # Normal mouse move handling
+        scene_pos = self.mapToScene(event.position().toPoint())
+        field_x, field_y = 0.0, 0.0  # Default values
+        
+        if self.image_rect.contains(scene_pos):
+            # Convert to field coordinates and track cursor
+            field_x, field_y = self.scene_to_field(scene_pos)
+            
+            # Update the cursor position for display/snapping
+            if not self.menu_open:
+                self._update_cursor_tracking(event)
+        
+        self.cursorMoved.emit(field_x, field_y)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self.dragging_point:
+            # Finish point dragging
+            self.dragging_point = False
+            self.drag_point_index = -1
+            self.setDragMode(QtWidgets.QGraphicsView.DragMode.ScrollHandDrag)  # Re-enable view panning
+            
+        super().mouseReleaseEvent(event)
+
+    def _find_point_at_position(self, field_x: float, field_y: float, tolerance: float = 5.0) -> int:
+        """Find if there's a point at the given field position within tolerance (in inches)"""
+        for i, point in enumerate(self.points):
+            dx = point['x'] - field_x
+            dy = point['y'] - field_y
+            distance = math.sqrt(dx*dx + dy*dy)
+            if distance <= tolerance:
+                return i
+        return -1
+
+    def _update_cursor_tracking(self, event: QtGui.QMouseEvent):
+        """Update cursor tracking for normal (non-dragging) mouse movement"""
+        scene_pos = self.mapToScene(event.position().toPoint())
+        field_x, field_y = self.scene_to_field(scene_pos)
+        
+        # Snap cursor to grid unless Shift is held
+        if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            # No snapping when shift is pressed
+            self.cursor_field_pos = (field_x, field_y)
+        else:
+            # Use the same grid spacing as the visual grid for cursor snapping
+            snap_resolution = self._get_current_grid_spacing()
+            snapped_x, snapped_y = self.snap_to_grid(field_x, field_y, snap_resolution)
+            self.cursor_field_pos = (snapped_x, snapped_y)
+        self._draw_cursor_point()
     
     def _show_context_menu(self, global_pos):
         """Show context menu for creating new points"""
@@ -2044,16 +2124,22 @@ class ControlPanel(QtWidgets.QWidget):
         self.chk_pixel_coords = QtWidgets.QCheckBox("Show pixel coordinates")
         mg.addWidget(self.chk_pixel_coords, 2, 0, 1, 3)
         
+        # Measurement snap to grid option
+        self.chk_measurement_snap = QtWidgets.QCheckBox("Snap measurements to grid")
+        self.chk_measurement_snap.setChecked(True)  # Default to snapping enabled
+        self.chk_measurement_snap.setToolTip("When enabled, measurement points snap to grid intersections for precision")
+        mg.addWidget(self.chk_measurement_snap, 3, 0, 1, 3)
+        
         # Clear measurements button
         self.btn_clear_measurements = QtWidgets.QPushButton("Clear Measurements")
         self.btn_clear_measurements.setEnabled(False)  # Initially disabled
-        mg.addWidget(self.btn_clear_measurements, 3, 0, 1, 3)
+        mg.addWidget(self.btn_clear_measurements, 4, 0, 1, 3)
         
         # Instructions label
         self.lbl_measurement_instructions = QtWidgets.QLabel("Enable measurement mode and select a tool to begin")
         self.lbl_measurement_instructions.setStyleSheet("color: #a0a0a0; font-size: 10px;")
         self.lbl_measurement_instructions.setWordWrap(True)
-        mg.addWidget(self.lbl_measurement_instructions, 4, 0, 1, 3)
+        mg.addWidget(self.lbl_measurement_instructions, 5, 0, 1, 3)
         
         layout.addWidget(measure_group)
 
@@ -2062,6 +2148,8 @@ class ControlPanel(QtWidgets.QWidget):
         pg = QtWidgets.QGridLayout(pts_group)
 
         self.list_points = QtWidgets.QListWidget()
+        self.list_points.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_points.customContextMenuRequested.connect(self._show_points_context_menu)
         self._refresh_points_list()
         pg.addWidget(self.list_points, 0, 0, 5, 1)
 
@@ -2214,20 +2302,7 @@ class ControlPanel(QtWidgets.QWidget):
         self.btn_export = QtWidgets.QPushButton("Export Snapshot")
         ig.addWidget(self.btn_save); ig.addWidget(self.btn_load); ig.addWidget(self.btn_export)
         layout.addWidget(io_group)
-
-        # Instructions
-        info = QtWidgets.QGroupBox("Instructions")
-        il = QtWidgets.QVBoxLayout(info)
-        lbl = QtWidgets.QLabel(
-            "• Pan: click + drag  • Zoom: mouse wheel\n"
-            "• Right-click: create points, vectors, or lines\n"
-            "• Click list items to select and edit\n"
-            "• Lines: Show equation & test zones for robot code\n"
-            "• Grid spacing is in inches (bold every 6)"
-        )
-        lbl.setWordWrap(True)
-        il.addWidget(lbl)
-        layout.addWidget(info)
+        
         layout.addStretch(1)
 
         # Wire signals
@@ -2239,6 +2314,7 @@ class ControlPanel(QtWidgets.QWidget):
         self.chk_measurement_mode.toggled.connect(self._on_measurement_mode_toggled)
         self.combo_measurement_tool.currentTextChanged.connect(self._on_measurement_tool_changed)
         self.chk_pixel_coords.toggled.connect(self.view.set_coordinate_display_mode)
+        self.chk_measurement_snap.toggled.connect(self._on_measurement_snap_toggled)
         self.btn_clear_measurements.clicked.connect(self.view.clear_current_measurement)
         
         self.list_points.currentRowChanged.connect(self._on_point_chosen)
@@ -2729,6 +2805,10 @@ class ControlPanel(QtWidgets.QWidget):
         }
         self.lbl_measurement_instructions.setText(instructions.get(tool, "Select a measurement tool"))
 
+    def _on_measurement_snap_toggled(self, enabled: bool):
+        """Handle measurement snap to grid toggle"""
+        self.view.measurement_snap_to_grid = enabled
+
     def _on_point_chosen(self, row):
         self.view.selected_index = row
         self.view._rebuild_overlays()
@@ -2783,13 +2863,126 @@ class ControlPanel(QtWidgets.QWidget):
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Export Error", str(e))
 
+    def _show_points_context_menu(self, position):
+        """Show context menu for points list"""
+        if not self.list_points.itemAt(position):
+            return  # No item at position
+            
+        menu = QtWidgets.QMenu(self)
+        
+        # Get selected point info
+        current_row = self.list_points.currentRow()
+        if 0 <= current_row < len(self.view.points):
+            point = self.view.points[current_row]
+            
+            # Edit point action
+            edit_action = menu.addAction("Edit Point")
+            edit_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+            edit_action.triggered.connect(self._edit_selected_point)
+            
+            # Copy coordinates action
+            copy_action = menu.addAction("Copy Coordinates")
+            copy_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView))
+            copy_action.triggered.connect(self._copy_point_coordinates)
+            
+            # Copy point data action
+            copy_data_action = menu.addAction("Copy Point Data")
+            copy_data_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogSaveButton))
+            copy_data_action.triggered.connect(self._copy_point_data)
+            
+            menu.addSeparator()
+            
+            # Zoom to point action
+            zoom_action = menu.addAction("Zoom to Point")
+            zoom_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+            zoom_action.triggered.connect(self._zoom_to_point)
+            
+            menu.addSeparator()
+            
+            # Delete point action
+            delete_action = menu.addAction("Delete Point")
+            delete_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
+            delete_action.triggered.connect(self._delete_selected_point_from_list)
+            
+            # Show point info
+            menu.addSeparator()
+            info_text = f"Point: {point['name']} at ({point['x']:.1f}, {point['y']:.1f})"
+            info_action = menu.addAction(info_text)
+            info_action.setEnabled(False)
+            
+        menu.exec(self.list_points.mapToGlobal(position))
+
+    def _edit_selected_point(self):
+        """Open edit dialog for selected point"""
+        current_row = self.list_points.currentRow()
+        if 0 <= current_row < len(self.view.points):
+            self.list_points.setCurrentRow(current_row)
+            self._on_point_selected(current_row)
+
+    def _copy_point_coordinates(self):
+        """Copy point coordinates to clipboard"""
+        current_row = self.list_points.currentRow()
+        if 0 <= current_row < len(self.view.points):
+            point = self.view.points[current_row]
+            coords_text = f"{point['x']:.2f}, {point['y']:.2f}"
+            QtWidgets.QApplication.clipboard().setText(coords_text)
+
+    def _copy_point_data(self):
+        """Copy full point data to clipboard as JSON"""
+        current_row = self.list_points.currentRow()
+        if 0 <= current_row < len(self.view.points):
+            point = self.view.points[current_row]
+            data_text = json.dumps(point, indent=2)
+            QtWidgets.QApplication.clipboard().setText(data_text)
+
+    def _zoom_to_point(self):
+        """Zoom and center view on selected point"""
+        current_row = self.list_points.currentRow()
+        if 0 <= current_row < len(self.view.points):
+            point = self.view.points[current_row]
+            # Convert field coordinates to scene coordinates
+            scene_point = self.view.field_to_scene(point['x'], point['y'])
+            # Center view on the point
+            self.view.centerOn(scene_point)
+            # Set a reasonable zoom level
+            self.view.setTransform(QtGui.QTransform().scale(2.0, 2.0))
+
+    def _delete_selected_point_from_list(self):
+        """Delete selected point from list with confirmation"""
+        current_row = self.list_points.currentRow()
+        if 0 <= current_row < len(self.view.points):
+            point = self.view.points[current_row]
+            reply = QtWidgets.QMessageBox.question(self, "Delete Point", 
+                                                  f"Delete point '{point['name']}'?",
+                                                  QtWidgets.QMessageBox.StandardButton.Yes | 
+                                                  QtWidgets.QMessageBox.StandardButton.No)
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                del self.view.points[current_row]
+                self.view.selected_index = -1
+                self.view._rebuild_overlays()
+                self._refresh_points_list()
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, image_path: str):
         super().__init__()
         
+        # Initialize settings
+        self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+        
+        # Enable drag and drop
+        self.setAcceptDrops(True)
+        
         # Store the current image path
         self.current_image_path = image_path
+        
+        # Initialize recent files list
+        self.recent_files = self._load_recent_files()
+        
+        # Track undo/redo actions
+        self.undo_stack = []
+        self.redo_stack = []
+        self.max_undo_levels = 50  # Maximum number of undo operations to remember
 
         # Load background image
         if not os.path.exists(image_path):
@@ -2805,6 +2998,9 @@ class MainWindow(QtWidgets.QMainWindow):
         scene = QtWidgets.QGraphicsScene(self)
         self.view = FieldView(scene, pixmap, image_path)
         self.setCentralWidget(self.view)
+        
+        # Create toolbar first
+        self._create_toolbar()
 
         # Controls (dock on right) - wrapped in scroll area
         self.panel = ControlPanel(self.view, self.current_image_path)
@@ -2812,17 +3008,38 @@ class MainWindow(QtWidgets.QMainWindow):
         # Connect image change signal
         self.panel.imageChangeRequested.connect(self._on_image_change_requested)
         
-        # Create scroll area for the control panel
+        # Create tab widget for controls and instructions
+        tab_widget = QtWidgets.QTabWidget()
+        
+        # Add controls tab
+        controls_scroll = QtWidgets.QScrollArea()
+        controls_scroll.setWidget(self.panel)
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        controls_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        tab_widget.addTab(controls_scroll, "Controls")
+        
+        # Add instructions tab
+        instructions_widget = self._create_instructions_widget()
+        instructions_scroll = QtWidgets.QScrollArea()
+        instructions_scroll.setWidget(instructions_widget)
+        instructions_scroll.setWidgetResizable(True)
+        tab_widget.addTab(instructions_scroll, "Help & Instructions")
+        
+        # Create scroll area for the tab widget
         scroll_area = QtWidgets.QScrollArea()
-        scroll_area.setWidget(self.panel)
+        scroll_area.setWidget(tab_widget)
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setMinimumWidth(320)  # Ensure minimum width for controls
+        scroll_area.setMinimumWidth(350)  # Ensure minimum width for tabs
         
         dock = QtWidgets.QDockWidget("Controls", self)
         dock.setWidget(scroll_area)
-        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable | 
+                        QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea | 
+                           QtCore.Qt.DockWidgetArea.RightDockWidgetArea |
+                           QtCore.Qt.DockWidgetArea.TopDockWidgetArea |
+                           QtCore.Qt.DockWidgetArea.BottomDockWidgetArea)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
         # Window styling
@@ -2876,6 +3093,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update the field selector to reflect the new current image
             self.panel.update_field_image_path(new_image_path)
             
+            # Add to recent files
+            self._add_recent_file(new_image_path)
+            
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error Loading Image", f"An error occurred while loading the image:\n{str(e)}")
     
@@ -2924,22 +3144,129 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu = menubar.addMenu("&File")
 
         act_open = QtGui.QAction("Open Field Image…", self)
+        act_open.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         act_open.triggered.connect(self._open_image)
         file_menu.addAction(act_open)
+        
+        act_save = QtGui.QAction("Save Points…", self)
+        act_save.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        act_save.triggered.connect(self._save_points)
+        file_menu.addAction(act_save)
+        
+        act_load = QtGui.QAction("Load Points…", self)
+        act_load.setShortcut(QtGui.QKeySequence("Ctrl+L"))
+        act_load.triggered.connect(self._load_points)
+        file_menu.addAction(act_load)
+        
+        file_menu.addSeparator()
+        
+        # Recent files submenu
+        recent_menu = file_menu.addMenu("Recent Files")
+        self._update_recent_files_menu(recent_menu)
+        
+        file_menu.addSeparator()
 
         act_exit = QtGui.QAction("Exit", self)
+        act_exit.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
         act_exit.triggered.connect(self.close)
         file_menu.addAction(act_exit)
 
+        # Edit Menu
+        edit_menu = menubar.addMenu("&Edit")
+        
+        act_undo = QtGui.QAction("Undo", self)
+        act_undo.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        act_undo.triggered.connect(self._undo)
+        edit_menu.addAction(act_undo)
+        
+        act_redo = QtGui.QAction("Redo", self)
+        act_redo.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
+        act_redo.triggered.connect(self._redo)
+        edit_menu.addAction(act_redo)
+        
+        edit_menu.addSeparator()
+        
+        act_add_point = QtGui.QAction("Add Point", self)
+        act_add_point.setShortcut(QtGui.QKeySequence("Ctrl+A"))
+        act_add_point.triggered.connect(self._add_point_at_center)
+        edit_menu.addAction(act_add_point)
+        
+        act_delete_point = QtGui.QAction("Delete Selected Point", self)
+        act_delete_point.setShortcut(QtGui.QKeySequence.StandardKey.Delete)
+        act_delete_point.triggered.connect(self._delete_selected_point)
+        edit_menu.addAction(act_delete_point)
+        
+        act_copy_coords = QtGui.QAction("Copy Coordinates", self)
+        act_copy_coords.setShortcut(QtGui.QKeySequence.StandardKey.Copy)
+        act_copy_coords.triggered.connect(self._copy_coordinates)
+        edit_menu.addAction(act_copy_coords)
+
+        # View Menu
         view_menu = menubar.addMenu("&View")
+        
+        act_zoom_in = QtGui.QAction("Zoom In", self)
+        act_zoom_in.setShortcut(QtGui.QKeySequence.StandardKey.ZoomIn)
+        act_zoom_in.triggered.connect(self._zoom_in)
+        view_menu.addAction(act_zoom_in)
+        
+        act_zoom_out = QtGui.QAction("Zoom Out", self)
+        act_zoom_out.setShortcut(QtGui.QKeySequence.StandardKey.ZoomOut)
+        act_zoom_out.triggered.connect(self._zoom_out)
+        view_menu.addAction(act_zoom_out)
+        
         reset_zoom = QtGui.QAction("Reset View", self)
+        reset_zoom.setShortcut(QtGui.QKeySequence("Ctrl+0"))
         reset_zoom.triggered.connect(self._reset_view)
         view_menu.addAction(reset_zoom)
+        
+        view_menu.addSeparator()
+        
+        act_toggle_grid = QtGui.QAction("Toggle Grid", self)
+        act_toggle_grid.setShortcut(QtGui.QKeySequence("Ctrl+G"))
+        act_toggle_grid.triggered.connect(self._toggle_grid)
+        view_menu.addAction(act_toggle_grid)
+        
+        act_toggle_measurement = QtGui.QAction("Toggle Measurement Mode", self)
+        act_toggle_measurement.setShortcut(QtGui.QKeySequence("Ctrl+M"))
+        act_toggle_measurement.triggered.connect(self._toggle_measurement_mode)
+        view_menu.addAction(act_toggle_measurement)
+        
+        view_menu.addSeparator()
+        
+        # UI Layout options
+        act_reset_layout = QtGui.QAction("Reset UI Layout", self)
+        act_reset_layout.setShortcut(QtGui.QKeySequence("Ctrl+Shift+R"))
+        act_reset_layout.triggered.connect(self._reset_ui_layout)
+        view_menu.addAction(act_reset_layout)
+        
+        act_fullscreen = QtGui.QAction("Toggle Fullscreen", self)
+        act_fullscreen.setShortcut(QtGui.QKeySequence.StandardKey.FullScreen)
+        act_fullscreen.triggered.connect(self._toggle_fullscreen)
+        view_menu.addAction(act_fullscreen)
+        
+        # Tools Menu
+        tools_menu = menubar.addMenu("&Tools")
+        
+        act_clear_measurements = QtGui.QAction("Clear Measurements", self)
+        act_clear_measurements.setShortcut(QtGui.QKeySequence("Ctrl+Shift+C"))
+        act_clear_measurements.triggered.connect(self._clear_measurements)
+        tools_menu.addAction(act_clear_measurements)
+        
+        act_export_image = QtGui.QAction("Export as Image…", self)
+        act_export_image.setShortcut(QtGui.QKeySequence("Ctrl+E"))
+        act_export_image.triggered.connect(self._export_image)
+        tools_menu.addAction(act_export_image)
 
         help_menu = menubar.addMenu("&Help")
         about = QtGui.QAction("About", self)
         about.triggered.connect(self._about)
         help_menu.addAction(about)
+        
+        # Keyboard shortcuts help
+        shortcuts_help = QtGui.QAction("Keyboard Shortcuts", self)
+        shortcuts_help.setShortcut(QtGui.QKeySequence.StandardKey.HelpContents)
+        shortcuts_help.triggered.connect(self._show_shortcuts_help)
+        help_menu.addAction(shortcuts_help)
 
     def _update_status_coords(self, x, y):
         self.coord_lbl.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
@@ -2956,15 +3283,800 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _about(self):
         QtWidgets.QMessageBox.information(self, "About",
-            "FTC Field Map Viewer – DECODE\n\n"
-            "• Drag to pan, wheel to zoom\n"
-            "• Grid spacing adjustable (inches)\n"
-            "• Add/remove/rename points, vectors, and lines\n"
-            "• Line equations for robot zone creation\n"
-            "• Zone testing with arbitrary points\n"
-            "• Save/load JSON, export snapshot as PNG\n"
-            "Dark theme, smooth antialiased rendering.\n"
+            f"FTC Field Map Viewer v{__version__}\n\n"
+            "Professional field visualization and measurement tool\n\n"
+            "Features:\n"
+            "• Interactive field visualization with measurement tools\n"
+            "• Points, vectors, and lines with drag & drop support\n"
+            "• Comprehensive keyboard shortcuts and context menus\n"
+            "• Undo/redo system with 50-level history\n"
+            "• Customizable UI with moveable panels\n"
+            "• Recent files management\n"
+            "• Professional toolbar and help system\n\n"
+            "Check the 'Help & Instructions' tab for complete usage guide.\n"
+            "Dark theme with smooth antialiased rendering."
         )
+
+    def _create_toolbar(self):
+        """Create the main toolbar with common actions"""
+        toolbar = self.addToolBar("Quick Actions")
+        toolbar.setMovable(True)
+        toolbar.setFloatable(True)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        
+        # File operations
+        open_action = QtGui.QAction("Open", self)
+        open_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
+        open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        open_action.setToolTip("Open field image (Ctrl+O)")
+        open_action.triggered.connect(self._open_image)
+        toolbar.addAction(open_action)
+        
+        save_action = QtGui.QAction("Save", self)
+        save_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogSaveButton))
+        save_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        save_action.setToolTip("Save points configuration (Ctrl+S)")
+        save_action.triggered.connect(self._save_points)
+        toolbar.addAction(save_action)
+        
+        # Recent files menu
+        recent_action = QtGui.QAction("Recent", self)
+        recent_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        recent_action.setToolTip("Open recent file")
+        recent_menu = QtWidgets.QMenu(self)
+        self._update_recent_files_menu(recent_menu)
+        recent_action.setMenu(recent_menu)
+        toolbar.addAction(recent_action)
+        
+        toolbar.addSeparator()
+        
+        # View operations
+        zoom_in_action = QtGui.QAction("Zoom In", self)
+        zoom_in_icon = self._create_text_icon("+", QtGui.QColor("white"))
+        zoom_in_action.setIcon(zoom_in_icon)
+        zoom_in_action.setShortcut(QtGui.QKeySequence.StandardKey.ZoomIn)
+        zoom_in_action.setToolTip("Zoom in (Ctrl++)")
+        zoom_in_action.triggered.connect(self._zoom_in)
+        toolbar.addAction(zoom_in_action)
+        
+        zoom_out_action = QtGui.QAction("Zoom Out", self)
+        zoom_out_icon = self._create_text_icon("−", QtGui.QColor("white"))
+        zoom_out_action.setIcon(zoom_out_icon)
+        zoom_out_action.setShortcut(QtGui.QKeySequence.StandardKey.ZoomOut)
+        zoom_out_action.setToolTip("Zoom out (Ctrl+-)")
+        zoom_out_action.triggered.connect(self._zoom_out)
+        toolbar.addAction(zoom_out_action)
+        
+        reset_view_action = QtGui.QAction("Fit View", self)
+        reset_view_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
+        reset_view_action.setShortcut(QtGui.QKeySequence("Ctrl+0"))
+        reset_view_action.setToolTip("Reset and fit view (Ctrl+0)")
+        reset_view_action.triggered.connect(self._reset_view)
+        toolbar.addAction(reset_view_action)
+        
+        toolbar.addSeparator()
+        
+        # Edit operations
+        undo_action = QtGui.QAction("Undo", self)
+        undo_icon = self._create_text_icon("↶", QtGui.QColor("white"))
+        undo_action.setIcon(undo_icon)
+        undo_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        undo_action.setToolTip("Undo last action (Ctrl+Z)")
+        undo_action.triggered.connect(self._undo)
+        toolbar.addAction(undo_action)
+        
+        redo_action = QtGui.QAction("Redo", self)
+        redo_icon = self._create_text_icon("↷", QtGui.QColor("white"))
+        redo_action.setIcon(redo_icon)
+        redo_action.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
+        redo_action.setToolTip("Redo last action (Ctrl+Y)")
+        redo_action.triggered.connect(self._redo)
+        toolbar.addAction(redo_action)
+        
+        toolbar.addSeparator()
+        
+        # Grid and measurement toggles
+        grid_action = QtGui.QAction("Grid", self)
+        grid_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton))
+        grid_action.setCheckable(True)
+        grid_action.setChecked(True)
+        grid_action.setShortcut(QtGui.QKeySequence("Ctrl+G"))
+        grid_action.setToolTip("Toggle grid visibility (Ctrl+G)")
+        grid_action.triggered.connect(self._toggle_grid)
+        toolbar.addAction(grid_action)
+        
+        measurement_action = QtGui.QAction("Measure", self)
+        measurement_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        measurement_action.setCheckable(True)
+        measurement_action.setShortcut(QtGui.QKeySequence("Ctrl+M"))
+        measurement_action.setToolTip("Toggle measurement mode (Ctrl+M)")
+        measurement_action.triggered.connect(self._toggle_measurement_mode)
+        toolbar.addAction(measurement_action)
+        
+        # Store action references for later use
+        self.toolbar_actions = {
+            'undo': undo_action,
+            'redo': redo_action,
+            'grid': grid_action,
+            'measurement': measurement_action,
+            'recent_menu': recent_menu
+        }
+
+    def _load_recent_files(self) -> List[str]:
+        """Load recent files from settings"""
+        recent = self.settings.value("recent_files", [])
+        if isinstance(recent, str):
+            recent = [recent]
+        elif not isinstance(recent, list):
+            recent = []
+        
+        # Filter out non-existent files
+        existing_files = [f for f in recent if os.path.exists(f)]
+        return existing_files[:MAX_RECENT_FILES]
+
+    def _save_recent_files(self):
+        """Save recent files to settings"""
+        self.settings.setValue("recent_files", self.recent_files)
+
+    def _add_recent_file(self, file_path: str):
+        """Add a file to recent files list"""
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+        self.recent_files.insert(0, file_path)
+        self.recent_files = self.recent_files[:MAX_RECENT_FILES]
+        self._save_recent_files()
+        self._update_recent_files_menu(self.toolbar_actions['recent_menu'])
+
+    def _update_recent_files_menu(self, menu: QtWidgets.QMenu):
+        """Update the recent files menu"""
+        menu.clear()
+        if not self.recent_files:
+            no_recent = QtGui.QAction("No recent files", self)
+            no_recent.setEnabled(False)
+            menu.addAction(no_recent)
+        else:
+            for file_path in self.recent_files:
+                action = QtGui.QAction(os.path.basename(file_path), self)
+                action.setToolTip(file_path)
+                action.triggered.connect(lambda checked, path=file_path: self._on_image_change_requested(path))
+                menu.addAction(action)
+            
+            menu.addSeparator()
+            clear_action = QtGui.QAction("Clear Recent Files", self)
+            clear_action.triggered.connect(self._clear_recent_files)
+            menu.addAction(clear_action)
+
+    def _clear_recent_files(self):
+        """Clear the recent files list"""
+        self.recent_files.clear()
+        self._save_recent_files()
+        self._update_recent_files_menu(self.toolbar_actions['recent_menu'])
+
+    def _save_points(self):
+        """Save current points configuration"""
+        if hasattr(self.view, 'points'):
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Points", "", "JSON Files (*.json)")
+            if path:
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(self.view.points, f, indent=2)
+                    self.statusBar().showMessage(f"Points saved to {path}", 3000)
+                    self._add_recent_file(path)
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Save Error", f"Failed to save points:\n{str(e)}")
+
+    def _zoom_in(self):
+        """Zoom in by a factor"""
+        self.view.scale(1.25, 1.25)
+
+    def _zoom_out(self):
+        """Zoom out by a factor"""
+        self.view.scale(0.8, 0.8)
+
+    def _toggle_grid(self):
+        """Toggle grid visibility"""
+        # Grid is always visible in this implementation
+        # You could add a grid_visible property to FieldView if needed
+        self.statusBar().showMessage("Grid toggle not yet implemented", 2000)
+
+    def _toggle_measurement_mode(self):
+        """Toggle measurement mode"""
+        if hasattr(self.panel, 'chk_measurement_mode'):
+            current_state = self.panel.chk_measurement_mode.isChecked()
+            self.panel.chk_measurement_mode.setChecked(not current_state)
+
+    def _undo(self):
+        """Undo last action"""
+        if self.undo_stack:
+            action = self.undo_stack.pop()
+            
+            # Create reverse action for redo
+            reverse_action = self._create_reverse_action(action)
+            self.redo_stack.append(reverse_action)
+            
+            # Apply the undo action
+            self._apply_action(action)
+            self._update_undo_redo_state()
+            self.statusBar().showMessage(f"Undid: {action.get('description', 'Unknown action')}", 2000)
+
+    def _redo(self):
+        """Redo last undone action"""
+        if self.redo_stack:
+            action = self.redo_stack.pop()
+            
+            # Create reverse action for undo
+            reverse_action = self._create_reverse_action(action)
+            self.undo_stack.append(reverse_action)
+            
+            # Apply the redo action
+            self._apply_action(action)
+            self._update_undo_redo_state()
+            self.statusBar().showMessage(f"Redid: {action.get('description', 'Unknown action')}", 2000)
+
+    def _record_action(self, action_type: str, description: str, data: dict):
+        """Record an action for undo/redo"""
+        action = {
+            'type': action_type,
+            'description': description,
+            'data': data.copy(),
+            'timestamp': QtCore.QDateTime.currentDateTime().toString()
+        }
+        
+        self.undo_stack.append(action)
+        
+        # Limit undo stack size
+        if len(self.undo_stack) > self.max_undo_levels:
+            self.undo_stack.pop(0)
+        
+        # Clear redo stack when new action is recorded
+        self.redo_stack.clear()
+        self._update_undo_redo_state()
+
+    def _create_reverse_action(self, action: dict) -> dict:
+        """Create the reverse action for undo/redo"""
+        action_type = action['type']
+        
+        if action_type == 'add_point':
+            return {
+                'type': 'delete_point',
+                'description': f"Remove point {action['data']['point']['name']}",
+                'data': {'index': action['data']['index']}
+            }
+        elif action_type == 'delete_point':
+            return {
+                'type': 'add_point',
+                'description': f"Restore point {action['data']['point']['name']}",
+                'data': {
+                    'point': action['data']['point'],
+                    'index': action['data']['index']
+                }
+            }
+        elif action_type == 'modify_point':
+            return {
+                'type': 'modify_point',
+                'description': f"Revert point {action['data']['new_point']['name']} changes",
+                'data': {
+                    'index': action['data']['index'],
+                    'old_point': action['data']['new_point'],
+                    'new_point': action['data']['old_point']
+                }
+            }
+        elif action_type == 'load_points':
+            return {
+                'type': 'load_points',
+                'description': "Restore previous points configuration",
+                'data': {
+                    'old_points': action['data']['new_points'],
+                    'new_points': action['data']['old_points']
+                }
+            }
+        
+        return action  # Fallback for unknown action types
+
+    def _apply_action(self, action: dict):
+        """Apply an undo/redo action"""
+        action_type = action['type']
+        data = action['data']
+        
+        if action_type == 'add_point':
+            # Insert point at specific index in user_points
+            index = data['index']
+            point = data['point']
+            # Calculate the correct index in user_points
+            user_index = max(0, index - len(self.view.default_points) if self.view.show_default_points else index)
+            self.view.user_points.insert(user_index, point)
+            
+        elif action_type == 'delete_point':
+            # Remove point at specific index from user_points
+            index = data['index']
+            # Calculate the correct index in user_points
+            if self.view.show_default_points and index < len(self.view.default_points):
+                # Can't delete default points
+                return
+            user_index = index - len(self.view.default_points) if self.view.show_default_points else index
+            if 0 <= user_index < len(self.view.user_points):
+                del self.view.user_points[user_index]
+                
+        elif action_type == 'modify_point':
+            # Modify point at specific index
+            index = data['index']
+            new_point = data['new_point']
+            # Calculate the correct index in user_points
+            if self.view.show_default_points and index < len(self.view.default_points):
+                # Can't modify default points
+                return
+            user_index = index - len(self.view.default_points) if self.view.show_default_points else index
+            if 0 <= user_index < len(self.view.user_points):
+                self.view.user_points[user_index] = new_point.copy()
+                
+        elif action_type == 'load_points':
+            # Replace all user points
+            self.view.user_points = data['new_points'].copy()
+        
+        # Update UI
+        self.view._rebuild_overlays()
+        self.panel._refresh_points_list()
+
+    def _update_undo_redo_state(self):
+        """Update undo/redo button states"""
+        if hasattr(self, 'toolbar_actions'):
+            self.toolbar_actions['undo'].setEnabled(bool(self.undo_stack))
+            self.toolbar_actions['redo'].setEnabled(bool(self.redo_stack))
+            
+            # Update tooltips with action descriptions
+            if self.undo_stack:
+                last_action = self.undo_stack[-1]
+                self.toolbar_actions['undo'].setToolTip(f"Undo: {last_action.get('description', 'Unknown action')}")
+            else:
+                self.toolbar_actions['undo'].setToolTip("Undo (no actions to undo)")
+                
+            if self.redo_stack:
+                last_action = self.redo_stack[-1]
+                self.toolbar_actions['redo'].setToolTip(f"Redo: {last_action.get('description', 'Unknown action')}")
+            else:
+                self.toolbar_actions['redo'].setToolTip("Redo (no actions to redo)")
+
+    def closeEvent(self, event):
+        """Handle application closing"""
+        # Save UI layout
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("windowState", self.saveState())
+        self._save_recent_files()
+        super().closeEvent(event)
+
+    def showEvent(self, event):
+        """Handle application showing"""
+        # Restore UI layout
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        
+        window_state = self.settings.value("windowState")
+        if window_state:
+            self.restoreState(window_state)
+            
+        super().showEvent(event)
+
+    def _load_points(self):
+        """Load points configuration from file"""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Points", "", "JSON Files (*.json)")
+        if path:
+            try:
+                self.view.load_points(path)
+                self.panel._refresh_points_list()
+                self.statusBar().showMessage(f"Points loaded from {path}", 3000)
+                self._add_recent_file(path)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Load Error", f"Failed to load points:\n{str(e)}")
+
+    def _add_point_at_center(self):
+        """Add a new point at the center of the field"""
+        new_point = {
+            "name": f"Point {len(self.view.points) + 1}",
+            "x": 0.0,
+            "y": 0.0,
+            "color": "#FF0000"
+        }
+        
+        # Record action for undo
+        action_data = {
+            'point': new_point.copy(),
+            'index': len(self.view.points)
+        }
+        self._record_action('add_point', f"Add point {new_point['name']}", action_data)
+        
+        self.view.user_points.append(new_point)
+        self.view._rebuild_overlays()
+        self.panel._refresh_points_list()
+        self.statusBar().showMessage("New point added at center", 2000)
+
+    def _delete_selected_point(self):
+        """Delete the currently selected point"""
+        if hasattr(self.view, 'selected_index') and 0 <= self.view.selected_index < len(self.view.points):
+            point = self.view.points[self.view.selected_index]
+            point_name = point['name']
+            
+            # Check if it's a default point (can't delete those)
+            if self.view.show_default_points and self.view.selected_index < len(self.view.default_points):
+                self.statusBar().showMessage("Cannot delete default points", 2000)
+                return
+            
+            # Record action for undo
+            action_data = {
+                'point': point.copy(),
+                'index': self.view.selected_index
+            }
+            self._record_action('delete_point', f"Delete point {point_name}", action_data)
+            
+            # Calculate user_points index
+            user_index = self.view.selected_index - len(self.view.default_points) if self.view.show_default_points else self.view.selected_index
+            if 0 <= user_index < len(self.view.user_points):
+                del self.view.user_points[user_index]
+                
+            self.view.selected_index = -1
+            self.view._rebuild_overlays()
+            self.panel._refresh_points_list()
+            self.statusBar().showMessage(f"Point '{point_name}' deleted", 2000)
+        else:
+            self.statusBar().showMessage("No point selected to delete", 2000)
+
+    def _copy_coordinates(self):
+        """Copy selected point coordinates to clipboard"""
+        if hasattr(self.view, 'selected_index') and 0 <= self.view.selected_index < len(self.view.points):
+            point = self.view.points[self.view.selected_index]
+            coords_text = f"{point['x']:.2f}, {point['y']:.2f}"
+            QtWidgets.QApplication.clipboard().setText(coords_text)
+            self.statusBar().showMessage(f"Coordinates copied: {coords_text}", 2000)
+        else:
+            self.statusBar().showMessage("No point selected to copy", 2000)
+
+    def _clear_measurements(self):
+        """Clear all measurement data"""
+        if hasattr(self.view, 'measurement_points'):
+            self.view.measurement_points.clear()
+            self.view._rebuild_overlays()
+            self.statusBar().showMessage("Measurements cleared", 2000)
+
+    def _export_image(self):
+        """Export current view as image"""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Image", "", "PNG Files (*.png);;JPEG Files (*.jpg)")
+        if path:
+            try:
+                # Create a pixmap of the current view
+                pixmap = self.view.grab()
+                pixmap.save(path)
+                self.statusBar().showMessage(f"Image exported to {path}", 3000)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to export image:\n{str(e)}")
+
+    def _show_shortcuts_help(self):
+        """Show keyboard shortcuts help dialog"""
+        shortcuts_text = """
+<h3>Keyboard Shortcuts</h3>
+<table style="font-family: monospace;">
+<tr><td><b>File Operations:</b></td><td></td></tr>
+<tr><td>Ctrl+O</td><td>Open field image</td></tr>
+<tr><td>Ctrl+S</td><td>Save points configuration</td></tr>
+<tr><td>Ctrl+L</td><td>Load points configuration</td></tr>
+<tr><td>Ctrl+Q</td><td>Exit application</td></tr>
+
+<tr><td><b>Edit Operations:</b></td><td></td></tr>
+<tr><td>Ctrl+Z</td><td>Undo last action</td></tr>
+<tr><td>Ctrl+Y</td><td>Redo last action</td></tr>
+<tr><td>Ctrl+A</td><td>Add point at center</td></tr>
+<tr><td>Delete</td><td>Delete selected point</td></tr>
+<tr><td>Ctrl+C</td><td>Copy point coordinates</td></tr>
+
+<tr><td><b>View Operations:</b></td><td></td></tr>
+<tr><td>Ctrl++</td><td>Zoom in</td></tr>
+<tr><td>Ctrl+-</td><td>Zoom out</td></tr>
+<tr><td>Ctrl+0</td><td>Reset view to fit</td></tr>
+<tr><td>Ctrl+G</td><td>Toggle grid</td></tr>
+<tr><td>Ctrl+M</td><td>Toggle measurement mode</td></tr>
+
+<tr><td><b>Tools:</b></td><td></td></tr>
+<tr><td>Ctrl+Shift+C</td><td>Clear measurements</td></tr>
+<tr><td>Ctrl+E</td><td>Export as image</td></tr>
+<tr><td>F1</td><td>Show this help</td></tr>
+
+<tr><td><b>Mouse Controls:</b></td><td></td></tr>
+<tr><td>Left Click</td><td>Select/place point</td></tr>
+<tr><td>Right Click</td><td>Context menu</td></tr>
+<tr><td>Mouse Wheel</td><td>Zoom in/out</td></tr>
+<tr><td>Drag</td><td>Pan view</td></tr>
+<tr><td>Shift+Click</td><td>Precise placement (no grid snap)</td></tr>
+</table>
+        """
+        
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Keyboard Shortcuts")
+        msg.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        msg.setText(shortcuts_text)
+        msg.exec()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        """Handle global keyboard shortcuts"""
+        key = event.key()
+        modifiers = event.modifiers()
+        
+        # Handle additional shortcuts not covered by menu actions
+        if key == QtCore.Qt.Key.Key_Escape:
+            # Exit measurement mode or clear selection
+            if hasattr(self.panel, 'chk_measurement_mode') and self.panel.chk_measurement_mode.isChecked():
+                self.panel.chk_measurement_mode.setChecked(False)
+            elif hasattr(self.view, 'selected_index'):
+                self.view.selected_index = -1
+                self.view._rebuild_overlays()
+            self.statusBar().showMessage("Selection cleared", 1000)
+            
+        elif key == QtCore.Qt.Key.Key_Space:
+            # Quick measurement mode toggle
+            if hasattr(self.panel, 'chk_measurement_mode'):
+                current_state = self.panel.chk_measurement_mode.isChecked()
+                self.panel.chk_measurement_mode.setChecked(not current_state)
+                
+        elif key >= QtCore.Qt.Key.Key_1 and key <= QtCore.Qt.Key.Key_9:
+            # Quick point selection (1-9)
+            point_index = key - QtCore.Qt.Key.Key_1
+            if point_index < len(self.view.points):
+                self.view.selected_index = point_index
+                self.view._rebuild_overlays()
+                self.panel._refresh_points_list()
+                point_name = self.view.points[point_index]['name']
+                self.statusBar().showMessage(f"Selected point: {point_name}", 2000)
+        
+        super().keyPressEvent(event)
+
+    def _reset_ui_layout(self):
+        """Reset UI layout to default"""
+        # Clear saved layout settings
+        self.settings.remove("geometry")
+        self.settings.remove("windowState")
+        
+        # Reset window to default size and position
+        self.resize(1100, 800)
+        self.move(100, 100)
+        
+        # Reset dock widget to right side
+        for dock in self.findChildren(QtWidgets.QDockWidget):
+            dock.setFloating(False)
+            self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        
+        # Reset toolbar to top
+        for toolbar in self.findChildren(QtWidgets.QToolBar):
+            toolbar.setFloatable(False)
+            self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+            toolbar.setFloatable(True)
+        
+        self.statusBar().showMessage("UI layout reset to default", 3000)
+
+    def _toggle_fullscreen(self):
+        """Toggle fullscreen mode"""
+        if self.isFullScreen():
+            self.showNormal()
+            self.statusBar().showMessage("Exited fullscreen mode", 2000)
+        else:
+            self.showFullScreen()
+            self.statusBar().showMessage("Entered fullscreen mode - Press F11 to exit", 3000)
+
+    def _create_text_icon(self, text: str, color: QtGui.QColor, size: int = 16) -> QtGui.QIcon:
+        """Create a text-based icon with specified color for better visibility"""
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        
+        font = painter.font()
+        font.setPointSize(size - 4)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(color)
+        
+        painter.drawText(pixmap.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+        
+        return QtGui.QIcon(pixmap)
+
+    def _create_instructions_widget(self) -> QtWidgets.QWidget:
+        """Create the comprehensive instructions widget for the help tab"""
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(15)
+        
+        # Welcome section
+        welcome = QtWidgets.QLabel("Welcome to FTC Field Viewer")
+        welcome.setStyleSheet("font-size: 18px; font-weight: bold; color: #00bcff; margin-bottom: 10px;")
+        layout.addWidget(welcome)
+        
+        # Quick start section
+        quick_start = QtWidgets.QGroupBox("Quick Start")
+        qs_layout = QtWidgets.QVBoxLayout(quick_start)
+        qs_text = QtWidgets.QLabel(
+            "1. Use the Field Image selector to choose your field\n"
+            "2. Right-click on the field to add points, vectors, or lines\n"
+            "3. Use the toolbar for quick access to common actions\n"
+            "4. Enable measurement mode for distance, angle, and area calculations"
+        )
+        qs_text.setWordWrap(True)
+        qs_layout.addWidget(qs_text)
+        layout.addWidget(quick_start)
+        
+        # Mouse controls section
+        mouse_controls = QtWidgets.QGroupBox("Mouse Controls")
+        mc_layout = QtWidgets.QVBoxLayout(mouse_controls)
+        mc_text = QtWidgets.QLabel(
+            "• Left Click: Select points, create measurements\n"
+            "• Right Click: Context menu (add points, vectors, lines)\n"
+            "• Drag: Pan the view around\n"
+            "• Mouse Wheel: Zoom in/out\n"
+            "• Shift + Click: Precise placement (no grid snap)\n"
+            "• Drag Points: Click and drag existing points to move them"
+        )
+        mc_text.setWordWrap(True)
+        mc_layout.addWidget(mc_text)
+        layout.addWidget(mouse_controls)
+        
+        # Keyboard shortcuts section
+        shortcuts = QtWidgets.QGroupBox("Essential Keyboard Shortcuts")
+        sc_layout = QtWidgets.QVBoxLayout(shortcuts)
+        sc_text = QtWidgets.QLabel(
+            "File Operations:\n"
+            "  Ctrl+O: Open field image\n"
+            "  Ctrl+S: Save points configuration\n"
+            "  Ctrl+L: Load points configuration\n\n"
+            "Edit Operations:\n"
+            "  Ctrl+Z: Undo last action\n"
+            "  Ctrl+Y: Redo last action\n"
+            "  Ctrl+A: Add point at center\n"
+            "  Delete: Delete selected point\n"
+            "  Ctrl+C: Copy point coordinates\n\n"
+            "View Operations:\n"
+            "  Ctrl++: Zoom in\n"
+            "  Ctrl+-: Zoom out\n"
+            "  Ctrl+0: Reset view to fit\n"
+            "  Ctrl+G: Toggle grid\n"
+            "  Ctrl+M: Toggle measurement mode\n"
+            "  F11: Toggle fullscreen\n\n"
+            "Quick Access:\n"
+            "  F1: Show complete keyboard shortcuts\n"
+            "  Escape: Clear selection/exit measurement mode\n"
+            "  Space: Quick measurement mode toggle\n"
+            "  1-9: Quick point selection"
+        )
+        sc_text.setWordWrap(True)
+        sc_text.setStyleSheet("font-family: monospace; font-size: 10px;")
+        sc_layout.addWidget(sc_text)
+        layout.addWidget(shortcuts)
+        
+        # Measurement tools section
+        measurement = QtWidgets.QGroupBox("Measurement Tools")
+        m_layout = QtWidgets.QVBoxLayout(measurement)
+        m_text = QtWidgets.QLabel(
+            "1. Enable 'Measurement Mode' checkbox\n"
+            "2. Select measurement tool from dropdown:\n"
+            "   • Distance: Click two points to measure distance\n"
+            "   • Angle: Click three points to measure angle\n"
+            "   • Area: Click multiple points to define polygon area\n"
+            "3. Use 'Snap measurements to grid' for precision\n"
+            "   • Hold Shift to temporarily disable snapping\n"
+            "4. Use 'Clear Measurements' to reset\n"
+            "5. Toggle 'Show Pixel Coordinates' for different coordinate systems"
+        )
+        m_text.setWordWrap(True)
+        m_layout.addWidget(m_text)
+        layout.addWidget(measurement)
+        
+        # Points and objects section
+        objects = QtWidgets.QGroupBox("Points, Vectors & Lines")
+        o_layout = QtWidgets.QVBoxLayout(objects)
+        o_text = QtWidgets.QLabel(
+            "Points:\n"
+            "• Right-click field → 'Create Point Here'\n"
+            "• Edit properties in the Controls tab\n"
+            "• Right-click point list for more options\n"
+            "• Drag points directly on the field\n\n"
+            "Vectors:\n"
+            "• Right-click field → 'Create Vector Here'\n"
+            "• Set magnitude and direction\n"
+            "• Useful for robot heading visualization\n\n"
+            "Lines:\n"
+            "• Create boundary lines for zones\n"
+            "• Generate equations for robot code\n"
+            "• Test point positions relative to lines"
+        )
+        o_text.setWordWrap(True)
+        o_layout.addWidget(o_text)
+        layout.addWidget(objects)
+        
+        # Advanced features section
+        advanced = QtWidgets.QGroupBox("Advanced Features")
+        a_layout = QtWidgets.QVBoxLayout(advanced)
+        a_text = QtWidgets.QLabel(
+            "Drag & Drop:\n"
+            "• Drag image files from explorer to load them\n"
+            "• Drag JSON files to load point configurations\n\n"
+            "UI Customization:\n"
+            "• Drag dock panels to any edge or float them\n"
+            "• Use 'Reset UI Layout' to restore defaults\n"
+            "• Fullscreen mode for presentations\n\n"
+            "File Management:\n"
+            "• Recent files dropdown in toolbar\n"
+            "• Export current view as image\n"
+            "• Save/load complete configurations"
+        )
+        a_text.setWordWrap(True)
+        a_layout.addWidget(a_text)
+        layout.addWidget(advanced)
+        
+        # Tips section
+        tips = QtWidgets.QGroupBox("Pro Tips")
+        t_layout = QtWidgets.QVBoxLayout(tips)
+        t_text = QtWidgets.QLabel(
+            "🎯 Hold Shift while clicking to disable grid snapping for precise placement\n"
+            "⚡ Use number keys 1-9 to quickly select points\n"
+            "🔄 All actions are undoable - experiment freely!\n"
+            "📏 Grid spacing automatically adjusts based on zoom level\n"
+            "🎨 Default points are read-only, but you can hide them\n"
+            "💾 Your UI layout and recent files are remembered between sessions\n"
+            "🖱️ Context menus (right-click) are available everywhere\n"
+            "⌨️ Press F1 anytime for complete keyboard shortcuts reference"
+        )
+        t_text.setWordWrap(True)
+        t_layout.addWidget(t_text)
+        layout.addWidget(tips)
+        
+        layout.addStretch()
+        return widget
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent):
+        """Handle drag enter events"""
+        if event.mimeData().hasUrls():
+            # Check if any of the URLs are valid file types
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    file_ext = os.path.splitext(file_path)[1].lower()
+                    if file_ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.json']:
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent):
+        """Handle drag move events"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QtGui.QDropEvent):
+        """Handle drop events"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    file_ext = os.path.splitext(file_path)[1].lower()
+                    
+                    if file_ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
+                        # Handle image files
+                        self._on_image_change_requested(file_path)
+                        self.statusBar().showMessage(f"Loaded image: {os.path.basename(file_path)}", 3000)
+                        event.acceptProposedAction()
+                        return
+                    elif file_ext == '.json':
+                        # Handle JSON configuration files
+                        try:
+                            self.view.load_points(file_path)
+                            self.panel._refresh_points_list()
+                            self.statusBar().showMessage(f"Loaded points: {os.path.basename(file_path)}", 3000)
+                            self._add_recent_file(file_path)
+                            event.acceptProposedAction()
+                            return
+                        except Exception as e:
+                            QtWidgets.QMessageBox.critical(self, "Load Error", f"Failed to load JSON file:\n{str(e)}")
+                            
+        event.ignore()
 
 
 def run_app():
