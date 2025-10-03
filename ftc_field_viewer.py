@@ -1390,17 +1390,275 @@ class FieldView(QtWidgets.QGraphicsView):
         img.save(path)
 
 
+class FieldImageSelector(QtWidgets.QWidget):
+    """Widget for selecting field images with previews"""
+    imageSelected = QtCore.Signal(str)  # Signal emitted when a field image is selected
+    
+    def __init__(self, current_image_path: str = "", *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_image_path = current_image_path
+        self.available_images = []
+        self._build_ui()
+        self._discover_field_images()
+    
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        
+        # Title
+        title = QtWidgets.QLabel("Field Images")
+        title.setStyleSheet("font-weight: bold; font-size: 14px; color: #8fbcd4;")
+        layout.addWidget(title)
+        
+        # Search field images button
+        refresh_btn = QtWidgets.QPushButton("Refresh Image List")
+        refresh_btn.clicked.connect(self._discover_field_images)
+        layout.addWidget(refresh_btn)
+        
+        # Scroll area for image list
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Container widget for image items
+        self.images_container = QtWidgets.QWidget()
+        self.images_layout = QtWidgets.QVBoxLayout(self.images_container)
+        self.images_layout.setContentsMargins(5, 5, 5, 5)
+        self.images_layout.setSpacing(8)
+        
+        scroll_area.setWidget(self.images_container)
+        layout.addWidget(scroll_area)
+        
+        # Instructions
+        instructions = QtWidgets.QLabel(
+            "Click on any field image to switch to it. Images are automatically discovered from:\n"
+            "• Field Maps/ directory\n"
+            "• Current directory\n"
+            "• Common field image locations"
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        layout.addWidget(instructions)
+    
+    def _discover_field_images(self):
+        """Discover available field images in common locations"""
+        self.available_images.clear()
+        
+        # Search paths - use a more comprehensive list
+        search_paths = [
+            "Field Maps",  # Relative to current directory
+            os.path.join(os.path.dirname(__file__), "Field Maps"),  # Relative to script
+            ".",  # Current directory
+        ]
+        
+        # Also add the directory of the current image if it's different
+        if self.current_image_path and os.path.exists(self.current_image_path):
+            current_dir = os.path.dirname(os.path.abspath(self.current_image_path))
+            search_paths.append(current_dir)
+        
+        # Normalize search paths to absolute paths and remove duplicates
+        normalized_paths = set()
+        for path in search_paths:
+            if os.path.exists(path):
+                abs_path = os.path.abspath(path)
+                normalized_paths.add(abs_path)
+        
+        # Common field image patterns
+        image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.gif']
+        field_keywords = ['field', 'decode', 'centerstage', 'powerplay', 'freight', 'skystone', 'rover', 'relic']
+        
+        found_images = set()  # Use set to avoid duplicates
+        field_related_images = set()
+        other_images = set()
+        
+        for search_path in normalized_paths:
+            try:
+                for root, dirs, files in os.walk(search_path):
+                    for file in files:
+                        file_lower = file.lower()
+                        # Check if it's an image file
+                        if any(file_lower.endswith(ext) for ext in image_extensions):
+                            full_path = os.path.abspath(os.path.join(root, file))
+                            # Separate field-related from other images
+                            if any(keyword in file_lower for keyword in field_keywords):
+                                field_related_images.add(full_path)
+                            else:
+                                other_images.add(full_path)
+            except (OSError, PermissionError):
+                continue
+        
+        # Combine field-related images first, then add up to 20 other images
+        found_images.update(field_related_images)
+        other_images_list = sorted(list(other_images))
+        found_images.update(other_images_list[:max(0, 25 - len(field_related_images))])
+        
+        # Convert to sorted list
+        self.available_images = sorted(list(found_images))
+        
+        # Always include the current image if it's not in the list
+        if self.current_image_path and os.path.exists(self.current_image_path):
+            abs_current = os.path.abspath(self.current_image_path)
+            if abs_current not in self.available_images:
+                self.available_images.insert(0, abs_current)
+        
+        self._update_image_list()
+    
+    def _update_image_list(self):
+        """Update the UI with the discovered images"""
+        # Clear existing items properly (both widgets and layout items)
+        while self.images_layout.count():
+            child = self.images_layout.takeAt(0)
+            if child.widget():
+                child.widget().setParent(None)
+            elif child.spacerItem():
+                # Remove spacer items properly
+                del child
+        
+        # Add image items
+        for image_path in self.available_images:
+            image_item = self._create_image_item(image_path)
+            self.images_layout.addWidget(image_item)
+        
+        # Add stretch to push items to top
+        self.images_layout.addStretch()
+    
+    def _create_image_item(self, image_path: str):
+        """Create a widget for displaying an image option"""
+        # Container widget
+        container = QtWidgets.QWidget()
+        container.setFixedHeight(120)
+        
+        # Check if this is the current image
+        is_current = os.path.abspath(image_path) == os.path.abspath(self.current_image_path) if self.current_image_path else False
+        
+        # Style the container
+        border_color = "#00ffd0" if is_current else "#555"
+        background_color = "#2d2d2d" if is_current else "#1e1e1e"
+        container.setStyleSheet(f"""
+            QWidget {{
+                border: 2px solid {border_color};
+                border-radius: 8px;
+                background-color: {background_color};
+                margin: 2px;
+            }}
+            QWidget:hover {{
+                border-color: #8fbcd4;
+                background-color: #2a2a2a;
+            }}
+        """)
+        
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Preview image
+        preview_label = QtWidgets.QLabel()
+        preview_label.setFixedSize(100, 100)
+        preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        preview_label.setStyleSheet("border: 1px solid #444; background-color: #333;")
+        
+        # Load and scale the image for preview
+        if os.path.exists(image_path):
+            try:
+                pixmap = QtGui.QPixmap(image_path)
+                if not pixmap.isNull():
+                    scaled_pixmap = pixmap.scaled(98, 98, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation)
+                    preview_label.setPixmap(scaled_pixmap)
+                else:
+                    preview_label.setText("Invalid\nImage")
+            except Exception:
+                preview_label.setText("Error\nLoading")
+        else:
+            preview_label.setText("File\nNot Found")
+        
+        layout.addWidget(preview_label)
+        
+        # Info section
+        info_layout = QtWidgets.QVBoxLayout()
+        
+        # File name
+        filename = os.path.basename(image_path)
+        name_label = QtWidgets.QLabel(filename)
+        name_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        name_label.setWordWrap(True)
+        info_layout.addWidget(name_label)
+        
+        # File path (truncated)
+        rel_path = os.path.relpath(image_path)
+        if len(rel_path) > 40:
+            rel_path = "..." + rel_path[-37:]
+        path_label = QtWidgets.QLabel(rel_path)
+        path_label.setStyleSheet("color: #a0a0a0; font-size: 10px;")
+        path_label.setWordWrap(True)
+        info_layout.addWidget(path_label)
+        
+        # Current indicator
+        if is_current:
+            current_label = QtWidgets.QLabel("● CURRENT")
+            current_label.setStyleSheet("color: #00ffd0; font-weight: bold; font-size: 10px;")
+            info_layout.addWidget(current_label)
+        
+        info_layout.addStretch()
+        layout.addLayout(info_layout)
+        
+        # Make the container clickable
+        container.mousePressEvent = lambda event, path=image_path: self._select_image(path)
+        container.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        
+        return container
+    
+    def _select_image(self, image_path: str):
+        """Handle image selection"""
+        if os.path.exists(image_path):
+            old_path = self.current_image_path
+            self.current_image_path = image_path
+            self.imageSelected.emit(image_path)
+            # Only refresh the UI display, don't re-discover images unless path changed significantly
+            if old_path != image_path:
+                self._update_image_list()  # Refresh to update current indicators
+    
+    def set_current_image(self, image_path: str):
+        """Update the current image selection from external source"""
+        self.current_image_path = image_path
+        self._update_image_list()
+
+
 class ControlPanel(QtWidgets.QWidget):
     requestAddPointAtCursor = QtCore.Signal()
+    imageChangeRequested = QtCore.Signal(str)  # New signal for image change requests
 
-    def __init__(self, view: FieldView, *args, **kwargs):
+    def __init__(self, view: FieldView, current_image_path: str = "", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.view = view
+        self.current_image_path = current_image_path
         self._build_ui()
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12,12,12,12)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(0)
+
+        # Create tab widget
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        
+        # Create controls tab (existing functionality)
+        controls_tab = self._create_controls_tab()
+        self.tab_widget.addTab(controls_tab, "Controls")
+        
+        # Create field selector tab
+        self.field_selector = FieldImageSelector(self.current_image_path)
+        self.field_selector.imageSelected.connect(self.imageChangeRequested.emit)
+        self.tab_widget.addTab(self.field_selector, "Field Images")
+        
+        layout.addWidget(self.tab_widget)
+
+    def _create_controls_tab(self):
+        """Create the original controls tab content"""
+        controls_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(controls_widget)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
         # Coordinates display
@@ -1632,6 +1890,14 @@ class ControlPanel(QtWidgets.QWidget):
         self.btn_line_add.clicked.connect(self._on_line_add)
         self.btn_line_update.clicked.connect(self._on_line_update)
         self.btn_line_remove.clicked.connect(self._on_line_remove)
+
+        return controls_widget
+
+    def update_field_image_path(self, new_path: str):
+        """Update the field selector with the new current image path"""
+        self.current_image_path = new_path
+        if hasattr(self, 'field_selector'):
+            self.field_selector.set_current_image(new_path)
 
     def _on_cursor_move(self, x, y):
         self.lbl_cursor.setText(f"Cursor: (x={x:0.2f}, y={y:0.2f}) in")
@@ -2086,13 +2352,19 @@ class ControlPanel(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, image_path: str):
         super().__init__()
+        
+        # Store the current image path
+        self.current_image_path = image_path
 
         # Load background image
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
-        pixmap = QtGui.QPixmap(image_path)
-        if pixmap.isNull():
+        original_pixmap = QtGui.QPixmap(image_path)
+        if original_pixmap.isNull():
             raise RuntimeError("Failed to load image (unsupported format or corrupt file).")
+        
+        # Auto-resize the image for consistent coordinate system
+        pixmap = self._auto_resize_field_image(original_pixmap)
 
         # Scene + View
         scene = QtWidgets.QGraphicsScene(self)
@@ -2100,7 +2372,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.view)
 
         # Controls (dock on right) - wrapped in scroll area
-        self.panel = ControlPanel(self.view)
+        self.panel = ControlPanel(self.view, self.current_image_path)
+        
+        # Connect image change signal
+        self.panel.imageChangeRequested.connect(self._on_image_change_requested)
         
         # Create scroll area for the control panel
         scroll_area = QtWidgets.QScrollArea()
@@ -2116,7 +2391,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
         # Window styling
-        self.setWindowTitle("FTC Field Map Viewer – DECODE")
+        self.setWindowTitle(f"FTC Field Map Viewer – {os.path.basename(image_path)}")
         self.setMinimumSize(1100, 800)
 
         # Status bar – live coordinate readout
@@ -2127,6 +2402,82 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Menu actions
         self._build_menu()
+    
+    def _on_image_change_requested(self, new_image_path: str):
+        """Handle requests to change the field image"""
+        try:
+            if not os.path.exists(new_image_path):
+                QtWidgets.QMessageBox.warning(self, "Image Not Found", f"The selected image file was not found:\n{new_image_path}")
+                return
+                
+            original_pixmap = QtGui.QPixmap(new_image_path)
+            if original_pixmap.isNull():
+                QtWidgets.QMessageBox.warning(self, "Invalid Image", f"Cannot load the selected image file:\n{new_image_path}\n\nPlease ensure it's a valid image format.")
+                return
+            
+            # Auto-resize image to maintain field coordinate system consistency
+            pixmap = self._auto_resize_field_image(original_pixmap)
+            
+            # Update the image in the view
+            self.view.image_item.setPixmap(pixmap)
+            self.view.image_rect = self.view.image_item.boundingRect()
+            self.view.setSceneRect(self.view.image_rect)
+            self.view._rebuild_overlays()
+            
+            # Update current image path
+            self.current_image_path = new_image_path
+            
+            # Update window title
+            self.setWindowTitle(f"FTC Field Map Viewer – {os.path.basename(new_image_path)}")
+            
+            # Reset view to fit the new image
+            self._reset_view()
+            
+            # Update the field selector to reflect the new current image
+            self.panel.update_field_image_path(new_image_path)
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error Loading Image", f"An error occurred while loading the image:\n{str(e)}")
+    
+    def _auto_resize_field_image(self, pixmap: QtGui.QPixmap) -> QtGui.QPixmap:
+        """Auto-resize field image to maintain consistent coordinate system scaling"""
+        # Target size for optimal field representation
+        # We want the field to be well-sized for the coordinate grid
+        # Standard field is 141" x 141", so we maintain square aspect ratio
+        
+        # Calculate target size based on field dimensions
+        # Use a reasonable default size that works well with the grid system
+        target_size = 800  # pixels for 141-inch field
+        
+        # Get original dimensions
+        original_width = pixmap.width()
+        original_height = pixmap.height()
+        
+        # Calculate aspect ratio
+        aspect_ratio = original_width / original_height
+        
+        # For FTC fields, we typically want square or near-square images
+        # If the image is significantly non-square, we'll fit it to a square
+        if abs(aspect_ratio - 1.0) < 0.2:  # Nearly square (within 20%)
+            # Keep it square
+            new_size = target_size
+            scaled_pixmap = pixmap.scaled(new_size, new_size, 
+                                        QtCore.Qt.AspectRatioMode.IgnoreAspectRatio, 
+                                        QtCore.Qt.TransformationMode.SmoothTransformation)
+        else:
+            # Maintain aspect ratio but fit within target size
+            if aspect_ratio > 1.0:  # Wide image
+                new_width = target_size
+                new_height = int(target_size / aspect_ratio)
+            else:  # Tall image
+                new_width = int(target_size * aspect_ratio)
+                new_height = target_size
+            
+            scaled_pixmap = pixmap.scaled(new_width, new_height, 
+                                        QtCore.Qt.AspectRatioMode.KeepAspectRatio, 
+                                        QtCore.Qt.TransformationMode.SmoothTransformation)
+        
+        return scaled_pixmap
 
     def _build_menu(self):
         menubar = self.menuBar()
@@ -2160,13 +2511,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _open_image(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Field Image", "", "Images (*.png *.jpg *.jpeg)")
         if path:
-            pixmap = QtGui.QPixmap(path)
-            if not pixmap.isNull():
-                self.view.image_item.setPixmap(pixmap)
-                self.view.image_rect = self.view.image_item.boundingRect()
-                self.view.setSceneRect(self.view.image_rect)
-                self.view._rebuild_overlays()
-                self._reset_view()
+            # Use the new image change mechanism
+            self._on_image_change_requested(path)
 
     def _about(self):
         QtWidgets.QMessageBox.information(self, "About",
