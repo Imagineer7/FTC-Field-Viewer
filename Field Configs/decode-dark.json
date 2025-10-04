@@ -22,55 +22,64 @@
       "name": "Long Range Launch Zone",
       "equation": "y <= x - 46 && y >= -x + 46",
       "color": "#ffaa00",
-      "opacity": 0.25
+      "opacity": 0.25,
+      "zone_type": "launch"
     },
     {
       "name": "Short Range Launch Zone", 
       "equation": "y >= 1.015 * x && y <= -1.015 * x",
       "color": "#ff6600",
-      "opacity": 0.25
+      "opacity": 0.25,
+      "zone_type": "launch"
     },
     {
       "name": "Red Parking Zone",
       "equation": "x >= 30 && x <= 45.75 && y >= -40.5 && y <= -24.7",
       "color": "#ff4d4d",
-      "opacity": 0.4
+      "opacity": 0.4,
+      "zone_type": "parking"
     },
     {
       "name": "Blue Parking Zone",
       "equation": "x >= 30 && x <= 45.75 && y >= 24.7 && y <= 40.5", 
       "color": "#4da6ff",
-      "opacity": 0.4
+      "opacity": 0.4,
+      "zone_type": "parking"
     },
     {
       "name": "Red Loading Zone",
       "equation": "y <= -47 && x >= 47",
       "color": "#cc0000",
-      "opacity": 0.3
+      "opacity": 0.3,
+      "zone_type": "loading"
     },
     {
       "name": "Blue Loading Zone",
       "equation": "y >= 47 && x >= 47",
       "color": "#0066cc", 
-      "opacity": 0.3
+      "opacity": 0.3,
+      "zone_type": "loading"
     },
     {
       "name": "Red Alliance Area",
       "equation": "y > 0 && x < 0",
       "color": "#ff6b6b",
-      "opacity": 0.15
+      "opacity": 0.15,
+      "zone_type": "red_alliance"
     },
     {
       "name": "Blue Alliance Area",
       "equation": "y < 0 && x < 0",
       "color": "#6ba6ff", 
-      "opacity": 0.15
+      "opacity": 0.15,
+      "zone_type": "blue_alliance"
     },
     {
       "name": "Risky Alliance Area",
       "equation": "x > 0",
       "color": "#ffff00",
-      "opacity": 0.2
+      "opacity": 0.2,
+      "zone_type": "risky"
     }
   ],
   "metadata": {

@@ -492,9 +492,11 @@ class FieldView(QtWidgets.QGraphicsView):
         if existing_image_items:
             # Use existing image item
             self.image_item = existing_image_items[0]
+            self.image_item.setZValue(0)  # Ensure image is at the background
         else:
             # Create new image item
             self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
+            self.image_item.setZValue(0)  # Ensure image is at the background
             self.scene().addItem(self.image_item)
         
         self.current_image_path = image_path
@@ -512,6 +514,8 @@ class FieldView(QtWidgets.QGraphicsView):
         self.selected_index = -1
         self.show_labels = True
         self.show_default_points = True    # Control visibility of default points
+        self.show_zones = True              # Control visibility of field zones
+        self.zone_polygon_cache = {}        # Cache for zone polygons to improve performance
         
         # Vector management
         self.vectors = []                   # list of dicts with name,x,y,magnitude,direction,color
@@ -821,6 +825,7 @@ class FieldView(QtWidgets.QGraphicsView):
         self._draw_vectors()
         self._draw_lines()
         self._draw_cursor_point()
+        self._update_zone_display()  # Redraw zones after clearing overlays
 
     def _draw_grid(self):
         iw = self.image_rect.width()
@@ -1525,6 +1530,11 @@ class FieldView(QtWidgets.QGraphicsView):
         self.show_default_points = show
         self._rebuild_overlays()
         self.pointsReloaded.emit()  # Notify control panel to refresh
+    
+    def set_show_zones(self, show: bool):
+        """Control visibility of field zones"""
+        self.show_zones = show
+        self._update_zone_display()
 
     def add_point(self, name, x, y, color="#ffd166"):
         self.user_points.append({"name": name, "x": float(x), "y": float(y), "color": color})
@@ -2405,6 +2415,10 @@ class FieldView(QtWidgets.QGraphicsView):
             self.field_zones = []
         self.field_zones = config.zones.copy() if hasattr(config.zones, 'copy') else list(config.zones)
         
+        # Clear zone polygon cache when configuration changes
+        if hasattr(self, 'zone_polygon_cache'):
+            self.zone_polygon_cache.clear()
+        
         # Reset selected index to avoid stale selections
         self.selected_index = -1
         
@@ -2425,16 +2439,25 @@ class FieldView(QtWidgets.QGraphicsView):
         
         self.zone_items = []
         
+        # Check if zones should be shown
+        if not hasattr(self, 'show_zones') or not self.show_zones:
+            return
+            
         if not hasattr(self, 'field_zones'):
             return
         
-        # Draw zones
+        # Draw zones using cached polygons for better performance
         for zone in self.field_zones:
             if not zone.is_valid:
                 continue
-                
-            # Create a polygon for the zone by sampling points
-            zone_polygon = self._create_zone_polygon(zone)
+            
+            # Check cache for this zone's polygon
+            zone_key = f"{zone.name}_{zone.equation}"
+            if zone_key not in self.zone_polygon_cache:
+                # Generate and cache the polygon
+                self.zone_polygon_cache[zone_key] = self._create_zone_polygon(zone)
+            
+            zone_polygon = self.zone_polygon_cache[zone_key]
             if zone_polygon and len(zone_polygon) > 2:
                 # Convert to scene coordinates
                 scene_points = []
@@ -2456,7 +2479,7 @@ class FieldView(QtWidgets.QGraphicsView):
                 border_color.setAlphaF(min(1.0, zone.opacity + 0.3))
                 polygon_item.setPen(QtGui.QPen(border_color, 1))
                 
-                polygon_item.setZValue(1)  # Above grid, below points
+                polygon_item.setZValue(2.5)  # Above grid and image, below measurement lines but clearly visible
                 self.zone_items.append(polygon_item)
     
     def _create_zone_polygon(self, zone) -> List[Tuple[float, float]]:
@@ -2464,58 +2487,87 @@ class FieldView(QtWidgets.QGraphicsView):
         if not zone.is_valid:
             return []
         
-        # Sample the field in a grid and find points that satisfy the zone equation
-        polygon_points = []
-        
-        # Define field boundaries
-        min_x, max_x = -HALF_FIELD, HALF_FIELD
-        min_y, max_y = -HALF_FIELD, HALF_FIELD
-        
-        # Sample resolution (higher = more detailed but slower)
-        resolution = 2.0  # inches
-        
-        # Find boundary points by scanning the perimeter
-        boundary_points = []
-        
-        # Top and bottom edges
-        for x in range(int(min_x), int(max_x) + 1, int(resolution)):
-            if zone.contains_point(x, max_y):
-                boundary_points.append((x, max_y))
-            if zone.contains_point(x, min_y):
-                boundary_points.append((x, min_y))
-        
-        # Left and right edges  
-        for y in range(int(min_y), int(max_y) + 1, int(resolution)):
-            if zone.contains_point(min_x, y):
-                boundary_points.append((min_x, y))
-            if zone.contains_point(max_x, y):
-                boundary_points.append((max_x, y))
-        
-        # Find interior points and create convex hull
-        interior_points = []
-        for x in range(int(min_x), int(max_x) + 1, int(resolution * 2)):
-            for y in range(int(min_y), int(max_y) + 1, int(resolution * 2)):
-                if zone.contains_point(x, y):
-                    interior_points.append((x, y))
-        
-        all_points = boundary_points + interior_points
-        
-        if len(all_points) < 3:
+        try:
+            # Define field boundaries
+            min_x, max_x = -HALF_FIELD, HALF_FIELD
+            min_y, max_y = -HALF_FIELD, HALF_FIELD
+            
+            # Balance resolution for performance vs accuracy
+            resolution = 3.0  # inches (good balance)
+            
+            # Create a grid of points that satisfy the zone equation
+            zone_points = []
+            
+            x_range = range(int(min_x), int(max_x) + 1, int(resolution))
+            y_range = range(int(min_y), int(max_y) + 1, int(resolution))
+            
+            for x in x_range:
+                for y in y_range:
+                    if zone.contains_point(float(x), float(y)):
+                        zone_points.append((float(x), float(y)))
+            
+            if len(zone_points) < 3:
+                return []
+            
+            # Proper convex hull algorithm for accurate shapes
+            def convex_hull(points):
+                if len(points) < 3:
+                    return points
+                    
+                # Find the bottom-most point (and left-most in case of tie)
+                bottom = min(points, key=lambda p: (p[1], p[0]))
+                
+                # Sort points by polar angle with respect to bottom point
+                def polar_angle(p):
+                    dx = p[0] - bottom[0]
+                    dy = p[1] - bottom[1]
+                    if dx == 0 and dy == 0:
+                        return -math.pi  # Bottom point itself
+                    return math.atan2(dy, dx)
+                
+                def distance_from_bottom(p):
+                    dx = p[0] - bottom[0]
+                    dy = p[1] - bottom[1]
+                    return dx * dx + dy * dy
+                
+                # Sort by angle, then by distance for collinear points
+                sorted_points = sorted(points, key=lambda p: (polar_angle(p), distance_from_bottom(p)))
+                
+                # Build convex hull using Graham scan
+                hull = []
+                for p in sorted_points:
+                    # Remove points that create a clockwise turn
+                    while len(hull) > 1:
+                        # Calculate cross product
+                        o = ((hull[-1][0] - hull[-2][0]) * (p[1] - hull[-2][1]) - 
+                             (hull[-1][1] - hull[-2][1]) * (p[0] - hull[-2][0]))
+                        if o <= 0:  # Clockwise or collinear - remove the middle point
+                            hull.pop()
+                        else:
+                            break
+                    hull.append(p)
+                
+                return hull
+            
+            # Create proper convex hull but limit points for performance
+            hull_points = convex_hull(zone_points)
+            
+            # If too many points, simplify by keeping every nth point
+            if len(hull_points) > 25:
+                step = len(hull_points) // 20
+                simplified_hull = []
+                for i in range(0, len(hull_points), step):
+                    simplified_hull.append(hull_points[i])
+                # Make sure we include the last point to close the shape properly
+                if hull_points[-1] not in simplified_hull:
+                    simplified_hull.append(hull_points[-1])
+                return simplified_hull
+            
+            return hull_points
+            
+        except Exception as e:
+            print(f"Error creating zone polygon for '{zone.name}': {e}")
             return []
-        
-        # Simple convex hull algorithm (for basic zone visualization)
-        # Sort points by angle from centroid
-        if all_points:
-            cx = sum(p[0] for p in all_points) / len(all_points)
-            cy = sum(p[1] for p in all_points) / len(all_points)
-            
-            def angle_from_center(point):
-                return math.atan2(point[1] - cy, point[0] - cx)
-            
-            sorted_points = sorted(all_points, key=angle_from_center)
-            return sorted_points[:20]  # Limit to 20 points for performance
-        
-        return []
 
 
 class FieldImageSelector(QtWidgets.QWidget):
@@ -2822,6 +2874,12 @@ class ControlPanel(QtWidgets.QWidget):
         self.chk_default_points = QtWidgets.QCheckBox("Show default points")
         self.chk_default_points.setChecked(True)
         gg.addWidget(self.chk_default_points, 2, 0, 1, 3)
+        
+        # Zone visibility controls
+        self.chk_show_zones = QtWidgets.QCheckBox("Show zones")
+        self.chk_show_zones.setChecked(True)
+        self.chk_show_zones.setToolTip("Toggle visibility of field zones")
+        gg.addWidget(self.chk_show_zones, 3, 0, 1, 3)
 
         layout.addWidget(grid_group)
 
@@ -3029,6 +3087,7 @@ class ControlPanel(QtWidgets.QWidget):
         self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
         self.chk_labels.toggled.connect(self.view.set_show_labels)
         self.chk_default_points.toggled.connect(self.view.set_show_default_points)
+        self.chk_show_zones.toggled.connect(self.view.set_show_zones)
         
         # Measurement controls
         self.chk_measurement_mode.toggled.connect(self._on_measurement_mode_toggled)
@@ -4129,9 +4188,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Auto-resize the image for consistent coordinate system
         pixmap = self._auto_resize_field_image(original_pixmap)
 
-        # Scene + View
-        scene = QtWidgets.QGraphicsScene(self)
-        self.view = FieldView(scene, pixmap, image_path)
+        # Create separate scenes for viewer and editor to avoid shared zone items
+        viewer_scene = QtWidgets.QGraphicsScene(self)
+        self.view = FieldView(viewer_scene, pixmap, image_path)
         
         # Create main tab widget for View Mode vs Edit Mode
         self.main_tab_widget = QtWidgets.QTabWidget()
@@ -4151,8 +4210,9 @@ class MainWindow(QtWidgets.QMainWindow):
             editor_layout = QtWidgets.QHBoxLayout(editor_widget)
             editor_layout.setContentsMargins(0, 0, 0, 0)
             
-            # Create a second view for the editor (shares same scene)
-            self.editor_view = FieldView(scene, pixmap, image_path)
+            # Create a separate scene for the editor to avoid shared zone items
+            editor_scene = QtWidgets.QGraphicsScene(self)
+            self.editor_view = FieldView(editor_scene, pixmap, image_path)
             self.editor_view.setEnabled(False)  # Disable interaction initially
             editor_layout.addWidget(self.editor_view)
             
@@ -4174,6 +4234,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.field_editor_panel = FieldEditorPanel()
             self.field_editor_panel.configurationChanged.connect(self._on_field_config_changed)
             self.field_editor_panel.imageChangeRequested.connect(self._on_image_change_requested)
+            self.field_editor_panel.zoneVisibilityChanged.connect(self._on_editor_zone_visibility_changed)
         else:
             self.field_editor_panel = None
         
@@ -4261,6 +4322,11 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Force a complete refresh of the views with proper timing
             QtCore.QTimer.singleShot(50, self._force_view_refresh)
+    
+    def _on_editor_zone_visibility_changed(self, visible: bool):
+        """Handle zone visibility changes from the field editor"""
+        if hasattr(self, 'editor_view'):
+            self.editor_view.set_show_zones(visible)
     
     def _force_view_refresh(self):
         """Force a complete refresh of both field views"""

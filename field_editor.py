@@ -36,11 +36,31 @@ import copy
 
 class Zone:
     """Represents a field zone with equation-based boundaries"""
-    def __init__(self, name: str, equation: str, color: str = "#ff6b6b", opacity: float = 0.3):
+    
+    # Define zone type color schemes
+    ZONE_TYPE_COLORS = {
+        "red_alliance": "#ff4d4d",
+        "blue_alliance": "#4da6ff", 
+        "neutral": "#ffaa00",
+        "launch": "#ff8800",
+        "parking": "#cc6600",
+        "loading": "#990033",
+        "risky": "#ffff00",
+        "custom": "#ff6b6b"
+    }
+    
+    def __init__(self, name: str, equation: str, color: str | None = None, opacity: float = 0.3, zone_type: str = "custom"):
         self.name = name
         self.equation = equation
-        self.color = color
+        self.zone_type = zone_type
         self.opacity = opacity
+        
+        # Determine color based on zone type if not explicitly provided
+        if color is None:
+            self.color = self.ZONE_TYPE_COLORS.get(zone_type, self.ZONE_TYPE_COLORS["custom"])
+        else:
+            self.color = color
+            
         self.compiled_expression = None
         self.is_valid = self._compile_equation()
         
@@ -133,7 +153,8 @@ class FieldConfiguration:
                     "name": zone.name,
                     "equation": zone.equation,
                     "color": zone.color,
-                    "opacity": zone.opacity
+                    "opacity": zone.opacity,
+                    "zone_type": zone.zone_type
                 } for zone in self.zones
             ],
             "metadata": self.metadata
@@ -153,8 +174,9 @@ class FieldConfiguration:
             zone = Zone(
                 zone_data["name"],
                 zone_data["equation"],
-                zone_data.get("color", "#ff6b6b"),
-                zone_data.get("opacity", 0.3)
+                zone_data.get("color", None),  # Let Zone class determine color based on type
+                zone_data.get("opacity", 0.3),
+                zone_data.get("zone_type", "custom")
             )
             config.zones.append(zone)
         
@@ -507,7 +529,17 @@ class ZoneEditorWidget(QtWidgets.QWidget):
         self.opacity_spin.setSingleStep(0.1)
         self.opacity_spin.setValue(0.3)
         
+        # Zone type dropdown
+        self.zone_type_combo = QtWidgets.QComboBox()
+        self.zone_type_combo.addItems([
+            "custom", "red_alliance", "blue_alliance", "neutral", 
+            "launch", "parking", "loading", "risky"
+        ])
+        self.zone_type_combo.setToolTip("Zone type determines automatic coloring")
+        self.zone_type_combo.currentTextChanged.connect(self._on_zone_type_changed)
+        
         details_layout.addRow("Name:", self.zone_name_edit)
+        details_layout.addRow("Type:", self.zone_type_combo)
         details_layout.addRow("Equation:", self.equation_edit)
         details_layout.addRow("Color:", self.zone_color_button)
         details_layout.addRow("Opacity:", self.opacity_spin)
@@ -552,7 +584,9 @@ class ZoneEditorWidget(QtWidgets.QWidget):
         
         layout.addLayout(button_layout)
         
-        self._update_zone_color_button("#ff6b6b")
+        # Set default zone type and color
+        self.zone_type_combo.setCurrentText("custom")
+        self._update_zone_color_button(Zone.ZONE_TYPE_COLORS["custom"])
     
     def _setup_zone_list(self):
         """Refresh the zone list display"""
@@ -579,6 +613,7 @@ class ZoneEditorWidget(QtWidgets.QWidget):
             zone = self.field_config.zones[index]
             
             self.zone_name_edit.setText(zone.name)
+            self.zone_type_combo.setCurrentText(getattr(zone, 'zone_type', 'custom'))
             self.equation_edit.setText(zone.equation)
             self.opacity_spin.setValue(zone.opacity)
             self._update_zone_color_button(zone.color)
@@ -605,7 +640,8 @@ class ZoneEditorWidget(QtWidgets.QWidget):
             name,
             equation,
             self.zone_color_button.property("color"),
-            self.opacity_spin.value()
+            self.opacity_spin.value(),
+            self.zone_type_combo.currentText()
         )
         
         if not zone.is_valid:
@@ -640,7 +676,8 @@ class ZoneEditorWidget(QtWidgets.QWidget):
                 name,
                 equation,
                 self.zone_color_button.property("color"),
-                self.opacity_spin.value()
+                self.opacity_spin.value(),
+                self.zone_type_combo.currentText()
             )
             
             if not zone.is_valid:
@@ -708,6 +745,12 @@ class ZoneEditorWidget(QtWidgets.QWidget):
         self.zone_color_button.setProperty("color", color)
         self.zone_color_button.setStyleSheet(f"background-color: {color}; border: 1px solid #ccc;")
     
+    def _on_zone_type_changed(self, zone_type: str):
+        """Handle zone type change - update color automatically"""
+        if zone_type in Zone.ZONE_TYPE_COLORS:
+            auto_color = Zone.ZONE_TYPE_COLORS[zone_type]
+            self._update_zone_color_button(auto_color)
+    
     def set_field_config(self, config: FieldConfiguration):
         """Set the field configuration to edit"""
         self.field_config = config
@@ -722,6 +765,7 @@ class FieldEditorPanel(QtWidgets.QWidget):
     
     configurationChanged = QtCore.Signal()
     imageChangeRequested = QtCore.Signal(str)  # Signal for image changes
+    zoneVisibilityChanged = QtCore.Signal(bool)  # Signal for zone visibility changes
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -756,6 +800,17 @@ class FieldEditorPanel(QtWidgets.QWidget):
         name_layout.addWidget(self.status_label)
         
         layout.addLayout(name_layout)
+        
+        # Display controls
+        display_group = QtWidgets.QGroupBox("Display Controls")
+        display_layout = QtWidgets.QGridLayout(display_group)
+        
+        self.chk_editor_show_zones = QtWidgets.QCheckBox("Show zones")
+        self.chk_editor_show_zones.setChecked(True)
+        self.chk_editor_show_zones.setToolTip("Toggle visibility of field zones in editor")
+        display_layout.addWidget(self.chk_editor_show_zones, 0, 0)
+        
+        layout.addWidget(display_group)
         
         # Quick Load section
         quick_load_group = QtWidgets.QGroupBox("📚 Quick Load Field Configs")
@@ -837,6 +892,9 @@ class FieldEditorPanel(QtWidgets.QWidget):
         
         # Initialize the config list
         self._refresh_config_list()
+        
+        # Connect zone visibility control
+        self.chk_editor_show_zones.toggled.connect(self.zoneVisibilityChanged.emit)
     
     def _on_field_name_changed(self):
         """Handle field name change"""
