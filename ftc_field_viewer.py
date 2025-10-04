@@ -6,7 +6,7 @@
 #see https://semver.org/ for semantic versioning guidelines.
 #When making changes, please update the RELEASE_NOTES.md file with a summary of changes.
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QSettings, QStandardPaths
