@@ -16,7 +16,16 @@ import math
 import os
 import sys
 import argparse
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+# Import field editor components
+try:
+    from field_editor import FieldEditorPanel, FieldConfiguration, Zone
+except ImportError:
+    # Handle case where field editor is not available
+    FieldEditorPanel = None
+    FieldConfiguration = None
+    Zone = None
 
 FIELD_SIZE_IN = 141.0
 HALF_FIELD = FIELD_SIZE_IN / 2.0
@@ -478,8 +487,16 @@ class FieldView(QtWidgets.QGraphicsView):
         self.dragging_point = False
         self.drag_point_index = -1
 
-        self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
-        self.scene().addItem(self.image_item)
+        # Check if image already exists in scene (for shared scenes)
+        existing_image_items = [item for item in self.scene().items() if isinstance(item, QtWidgets.QGraphicsPixmapItem)]
+        if existing_image_items:
+            # Use existing image item
+            self.image_item = existing_image_items[0]
+        else:
+            # Create new image item
+            self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
+            self.scene().addItem(self.image_item)
+        
         self.current_image_path = image_path
 
         self.grid_opacity = 0.5
@@ -790,9 +807,10 @@ class FieldView(QtWidgets.QGraphicsView):
 
     # --- Grid and points drawing ---
     def _clear_overlays(self):
-        # Remove all but image
+        # Remove all but image items
         for item in list(self.scene().items()):
-            if item is self.image_item:
+            # Keep all QGraphicsPixmapItem instances (field images)
+            if isinstance(item, QtWidgets.QGraphicsPixmapItem):
                 continue
             self.scene().removeItem(item)
 
@@ -2370,6 +2388,134 @@ class FieldView(QtWidgets.QGraphicsView):
         self.render(painter)
         painter.end()
         img.save(path)
+
+    def update_field_configuration(self, config):
+        """Update field with configuration from field editor"""
+        if not hasattr(config, 'points') or not hasattr(config, 'zones'):
+            return
+            
+        # Update default points - ensure proper format
+        self.default_points = []
+        for point in config.points:
+            if isinstance(point, dict) and all(key in point for key in ['name', 'x', 'y', 'color']):
+                self.default_points.append(point.copy())
+        
+        # Store zones for rendering
+        if not hasattr(self, 'field_zones'):
+            self.field_zones = []
+        self.field_zones = config.zones.copy() if hasattr(config.zones, 'copy') else list(config.zones)
+        
+        # Reset selected index to avoid stale selections
+        self.selected_index = -1
+        
+        # Force complete refresh
+        self._rebuild_overlays()
+        self._update_zone_display()
+        
+        # Emit signal to notify of points reload
+        self.pointsReloaded.emit()
+    
+    def _update_zone_display(self):
+        """Update zone visualization on the field"""
+        # Remove existing zone items
+        if hasattr(self, 'zone_items'):
+            for item in self.zone_items:
+                if item.scene():
+                    self.scene().removeItem(item)
+        
+        self.zone_items = []
+        
+        if not hasattr(self, 'field_zones'):
+            return
+        
+        # Draw zones
+        for zone in self.field_zones:
+            if not zone.is_valid:
+                continue
+                
+            # Create a polygon for the zone by sampling points
+            zone_polygon = self._create_zone_polygon(zone)
+            if zone_polygon and len(zone_polygon) > 2:
+                # Convert to scene coordinates
+                scene_points = []
+                for x, y in zone_polygon:
+                    scene_point = self.field_to_scene(x, y)
+                    scene_points.append(scene_point)
+                
+                # Create polygon item
+                qt_polygon = QtGui.QPolygonF(scene_points)
+                polygon_item = self.scene().addPolygon(qt_polygon)
+                
+                # Set zone appearance
+                zone_color = QtGui.QColor(zone.color)
+                zone_color.setAlphaF(zone.opacity)
+                polygon_item.setBrush(QtGui.QBrush(zone_color))
+                
+                # Set border
+                border_color = QtGui.QColor(zone.color)
+                border_color.setAlphaF(min(1.0, zone.opacity + 0.3))
+                polygon_item.setPen(QtGui.QPen(border_color, 1))
+                
+                polygon_item.setZValue(1)  # Above grid, below points
+                self.zone_items.append(polygon_item)
+    
+    def _create_zone_polygon(self, zone) -> List[Tuple[float, float]]:
+        """Create a polygon representation of a zone by sampling the field"""
+        if not zone.is_valid:
+            return []
+        
+        # Sample the field in a grid and find points that satisfy the zone equation
+        polygon_points = []
+        
+        # Define field boundaries
+        min_x, max_x = -HALF_FIELD, HALF_FIELD
+        min_y, max_y = -HALF_FIELD, HALF_FIELD
+        
+        # Sample resolution (higher = more detailed but slower)
+        resolution = 2.0  # inches
+        
+        # Find boundary points by scanning the perimeter
+        boundary_points = []
+        
+        # Top and bottom edges
+        for x in range(int(min_x), int(max_x) + 1, int(resolution)):
+            if zone.contains_point(x, max_y):
+                boundary_points.append((x, max_y))
+            if zone.contains_point(x, min_y):
+                boundary_points.append((x, min_y))
+        
+        # Left and right edges  
+        for y in range(int(min_y), int(max_y) + 1, int(resolution)):
+            if zone.contains_point(min_x, y):
+                boundary_points.append((min_x, y))
+            if zone.contains_point(max_x, y):
+                boundary_points.append((max_x, y))
+        
+        # Find interior points and create convex hull
+        interior_points = []
+        for x in range(int(min_x), int(max_x) + 1, int(resolution * 2)):
+            for y in range(int(min_y), int(max_y) + 1, int(resolution * 2)):
+                if zone.contains_point(x, y):
+                    interior_points.append((x, y))
+        
+        all_points = boundary_points + interior_points
+        
+        if len(all_points) < 3:
+            return []
+        
+        # Simple convex hull algorithm (for basic zone visualization)
+        # Sort points by angle from centroid
+        if all_points:
+            cx = sum(p[0] for p in all_points) / len(all_points)
+            cy = sum(p[1] for p in all_points) / len(all_points)
+            
+            def angle_from_center(point):
+                return math.atan2(point[1] - cy, point[0] - cx)
+            
+            sorted_points = sorted(all_points, key=angle_from_center)
+            return sorted_points[:20]  # Limit to 20 points for performance
+        
+        return []
 
 
 class FieldImageSelector(QtWidgets.QWidget):
@@ -3986,7 +4132,36 @@ class MainWindow(QtWidgets.QMainWindow):
         # Scene + View
         scene = QtWidgets.QGraphicsScene(self)
         self.view = FieldView(scene, pixmap, image_path)
-        self.setCentralWidget(self.view)
+        
+        # Create main tab widget for View Mode vs Edit Mode
+        self.main_tab_widget = QtWidgets.QTabWidget()
+        self.main_tab_widget.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        
+        # Create Field Viewer tab (existing functionality)
+        viewer_widget = QtWidgets.QWidget()
+        viewer_layout = QtWidgets.QHBoxLayout(viewer_widget)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.addWidget(self.view)
+        
+        self.main_tab_widget.addTab(viewer_widget, "Field Viewer")
+        
+        # Create Field Editor tab (if field editor is available)
+        if FieldEditorPanel is not None:
+            editor_widget = QtWidgets.QWidget()
+            editor_layout = QtWidgets.QHBoxLayout(editor_widget)
+            editor_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Create a second view for the editor (shares same scene)
+            self.editor_view = FieldView(scene, pixmap, image_path)
+            self.editor_view.setEnabled(False)  # Disable interaction initially
+            editor_layout.addWidget(self.editor_view)
+            
+            self.main_tab_widget.addTab(editor_widget, "Field Editor")
+            
+            # Connect tab change to handle mode switching
+            self.main_tab_widget.currentChanged.connect(self._on_mode_changed)
+        
+        self.setCentralWidget(self.main_tab_widget)
         
         # Create toolbar first
         self._create_toolbar()
@@ -3994,30 +4169,39 @@ class MainWindow(QtWidgets.QMainWindow):
         # Controls (dock on right) - wrapped in scroll area
         self.panel = ControlPanel(self.view, self.current_image_path)
         
+        # Create field editor panel if available
+        if FieldEditorPanel is not None:
+            self.field_editor_panel = FieldEditorPanel()
+            self.field_editor_panel.configurationChanged.connect(self._on_field_config_changed)
+            self.field_editor_panel.imageChangeRequested.connect(self._on_image_change_requested)
+        else:
+            self.field_editor_panel = None
+        
         # Connect image change signal
         self.panel.imageChangeRequested.connect(self._on_image_change_requested)
         
         # Create tab widget for controls and instructions
-        tab_widget = QtWidgets.QTabWidget()
+        self.control_tab_widget = QtWidgets.QTabWidget()
         
-        # Add controls tab
-        controls_scroll = QtWidgets.QScrollArea()
-        controls_scroll.setWidget(self.panel)
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        controls_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        tab_widget.addTab(controls_scroll, "Controls")
+        # Create stacked widget to switch between control panels
+        self.control_stack = QtWidgets.QStackedWidget()
+        self.control_stack.addWidget(self.panel)  # Index 0: Viewer controls
+        if self.field_editor_panel is not None:
+            self.control_stack.addWidget(self.field_editor_panel)  # Index 1: Editor controls
+        
+        # Add controls tab with stacked widget
+        self.control_tab_widget.addTab(self.control_stack, "Controls")
         
         # Add instructions tab
         instructions_widget = self._create_instructions_widget()
         instructions_scroll = QtWidgets.QScrollArea()
         instructions_scroll.setWidget(instructions_widget)
         instructions_scroll.setWidgetResizable(True)
-        tab_widget.addTab(instructions_scroll, "Help & Instructions")
+        self.control_tab_widget.addTab(instructions_scroll, "Help & Instructions")
         
         # Create scroll area for the tab widget
         scroll_area = QtWidgets.QScrollArea()
-        scroll_area.setWidget(tab_widget)
+        scroll_area.setWidget(self.control_tab_widget)
         scroll_area.setWidgetResizable(True)
         scroll_area.setMinimumWidth(350)  # Ensure minimum width for tabs
         
@@ -4044,6 +4228,68 @@ class MainWindow(QtWidgets.QMainWindow):
         # Menu actions
         self._build_menu()
     
+    def _on_mode_changed(self, index: int):
+        """Handle switching between View Mode and Edit Mode"""
+        if index == 0:  # Field Viewer mode
+            # Switch controls to viewer panel
+            self.control_stack.setCurrentIndex(0)
+            # Enable viewer interactions
+            self.view.setEnabled(True)
+            if hasattr(self, 'editor_view'):
+                self.editor_view.setEnabled(False)
+        elif index == 1 and self.field_editor_panel is not None:  # Field Editor mode
+            # Switch controls to editor panel
+            self.control_stack.setCurrentIndex(1)
+            # Enable editor interactions
+            if hasattr(self, 'editor_view'):
+                self.editor_view.setEnabled(True)
+            self.view.setEnabled(False)
+            
+            # Auto-load current field config if none loaded
+            if hasattr(self.field_editor_panel, 'current_config') and not self.field_editor_panel.current_config.points:
+                # Use a small delay to ensure the editor is fully initialized
+                QtCore.QTimer.singleShot(200, self._auto_load_matching_config)
+    
+    def _on_field_config_changed(self):
+        """Handle field configuration changes from the editor"""
+        if hasattr(self, 'field_editor_panel') and self.field_editor_panel:
+            config = self.field_editor_panel.get_field_configuration()
+            # Update both views with new configuration
+            self.view.update_field_configuration(config)
+            if hasattr(self, 'editor_view'):
+                self.editor_view.update_field_configuration(config)
+            
+            # Force a complete refresh of the views with proper timing
+            QtCore.QTimer.singleShot(50, self._force_view_refresh)
+    
+    def _force_view_refresh(self):
+        """Force a complete refresh of both field views"""
+        self.view._rebuild_overlays()
+        if hasattr(self, 'editor_view'):
+            self.editor_view._rebuild_overlays()
+    
+    def _auto_load_matching_config(self):
+        """Auto-load field config that matches current image"""
+        if not hasattr(self, 'field_editor_panel') or self.field_editor_panel is None:
+            return
+            
+        try:
+            current_image_name = os.path.basename(self.current_image_path)
+            config_name = os.path.splitext(current_image_name)[0] + ".json"
+            
+            script_dir = os.path.dirname(__file__)
+            config_path = os.path.join(script_dir, "Field Configs", config_name)
+            
+            if os.path.exists(config_path):
+                # Find the config in the list and load it
+                for i in range(self.field_editor_panel.config_list.count()):
+                    item = self.field_editor_panel.config_list.item(i)
+                    if item and item.data(QtCore.Qt.ItemDataRole.UserRole) == config_path:
+                        self.field_editor_panel._load_config_from_item(item)
+                        break
+        except Exception as e:
+            print(f"Auto-load config failed: {e}")
+    
     def _on_image_change_requested(self, new_image_path: str):
         """Handle requests to change the field image"""
         try:
@@ -4059,16 +4305,30 @@ class MainWindow(QtWidgets.QMainWindow):
             # Auto-resize image to maintain field coordinate system consistency
             pixmap = self._auto_resize_field_image(original_pixmap)
             
-            # Update the image in the view
+            # Update the image in both views
             self.view.image_item.setPixmap(pixmap)
             self.view.image_rect = self.view.image_item.boundingRect()
             self.view.setSceneRect(self.view.image_rect)
             
-            # Reload default points for the new field
-            self.view.reload_default_points_for_image(new_image_path)
+            if hasattr(self, 'editor_view') and self.editor_view:
+                self.editor_view.image_item.setPixmap(pixmap)
+                self.editor_view.image_rect = self.editor_view.image_item.boundingRect()
+                self.editor_view.setSceneRect(self.editor_view.image_rect)
             
-            # Rebuild overlays after points are loaded
-            self.view._rebuild_overlays()
+            # Check if this change is coming from field editor
+            is_from_field_editor = (hasattr(self, 'field_editor_panel') and 
+                                   self.field_editor_panel and 
+                                   self.main_tab_widget.currentIndex() == 1)
+            
+            if not is_from_field_editor:
+                # Normal image change - reload default points from file
+                self.view.reload_default_points_for_image(new_image_path)
+                # Rebuild overlays after points are loaded
+                self.view._rebuild_overlays()
+            else:
+                # Image change from field editor - don't reload default points, 
+                # let the field configuration handle it
+                pass
             
             # Update current image path
             self.current_image_path = new_image_path
@@ -4080,7 +4340,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_view()
             
             # Update the field selector to reflect the new current image
-            self.panel.update_field_image_path(new_image_path)
+            if hasattr(self.panel, 'update_field_image_path'):
+                self.panel.update_field_image_path(new_image_path)
             
             # Add to recent files
             self._add_recent_file(new_image_path)

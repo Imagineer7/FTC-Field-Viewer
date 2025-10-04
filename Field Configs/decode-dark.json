@@ -1,0 +1,81 @@
+{
+  "name": "DECODE (2025-26 Season)",
+  "points": [
+    {
+      "name": "Red Goal (ID 24)",
+      "x": -58.3727,
+      "y": 55.6425,
+      "color": "#ff4d4d"
+    },
+    {
+      "name": "Blue Goal (ID 20)",
+      "x": -58.3727,
+      "y": -55.6425,
+      "color": "#4da6ff"
+    }
+  ],
+  "associated_images": [
+    "Field Maps/decode-dark.png"
+  ],
+  "zones": [
+    {
+      "name": "Long Range Launch Zone",
+      "equation": "y <= x - 46 && y >= -x + 46",
+      "color": "#ffaa00",
+      "opacity": 0.25
+    },
+    {
+      "name": "Short Range Launch Zone", 
+      "equation": "y >= 1.015 * x && y <= -1.015 * x",
+      "color": "#ff6600",
+      "opacity": 0.25
+    },
+    {
+      "name": "Red Parking Zone",
+      "equation": "x >= 30 && x <= 45.75 && y >= -40.5 && y <= -24.7",
+      "color": "#ff4d4d",
+      "opacity": 0.4
+    },
+    {
+      "name": "Blue Parking Zone",
+      "equation": "x >= 30 && x <= 45.75 && y >= 24.7 && y <= 40.5", 
+      "color": "#4da6ff",
+      "opacity": 0.4
+    },
+    {
+      "name": "Red Loading Zone",
+      "equation": "y <= -47 && x >= 47",
+      "color": "#cc0000",
+      "opacity": 0.3
+    },
+    {
+      "name": "Blue Loading Zone",
+      "equation": "y >= 47 && x >= 47",
+      "color": "#0066cc", 
+      "opacity": 0.3
+    },
+    {
+      "name": "Red Alliance Area",
+      "equation": "y > 0 && x < 0",
+      "color": "#ff6b6b",
+      "opacity": 0.15
+    },
+    {
+      "name": "Blue Alliance Area",
+      "equation": "y < 0 && x < 0",
+      "color": "#6ba6ff", 
+      "opacity": 0.15
+    },
+    {
+      "name": "Risky Alliance Area",
+      "equation": "x > 0",
+      "color": "#ffff00",
+      "opacity": 0.2
+    }
+  ],
+  "metadata": {
+    "created": "2024-10-03T00:00:00",
+    "modified": "2024-10-03T00:00:00", 
+    "description": "Official FTC DECODE (2023-24) field configuration with AprilTag goals and alliance zones."
+  }
+}

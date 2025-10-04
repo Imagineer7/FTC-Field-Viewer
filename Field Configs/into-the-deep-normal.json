@@ -1,0 +1,99 @@
+{
+  "name": "INTO THE DEEP (2024-25 Season)",
+  "points": [
+    {
+      "name": "Red Sample Scoring Zone",
+      "x": -61.5,
+      "y": -61.5,
+      "color": "#ff4d4d"
+    },
+    {
+      "name": "Blue Observation Zone",
+      "x": -58.75,
+      "y": 64.62,
+      "color": "#4da6ff"
+    },
+    {
+      "name": "Red Specimen Scoring",
+      "x": 0,
+      "y": -23.5,
+      "color": "#ff6b6b"
+    },
+    {
+      "name": "Blue Specimen Scoring",
+      "x": 0,
+      "y": 23.5,
+      "color": "#6ba6ff"
+    },
+    {
+      "name": "Red Observation Zone",
+      "x": 58.75,
+      "y": -64.62,
+      "color": "#ff9999"
+    },
+    {
+      "name": "Blue Sample Scoring Zone",
+      "x": 61.69,
+      "y": 61.69,
+      "color": "#99b3ff"
+    },
+    {
+      "name": "Submersible",
+      "x": 0.0,
+      "y": 0.0,
+      "color": "#00ffd0"
+    }
+  ],
+  "associated_images": [
+    "Field Maps/into-the-deep-normal.png"
+  ],
+  "zones": [
+    {
+      "name": "Red Alliance Zone",
+      "equation": "y <= 0",
+      "color": "#ff6b6b",
+      "opacity": 0.15
+    },
+    {
+      "name": "Blue Alliance Zone", 
+      "equation": "y >= 0",
+      "color": "#6ba6ff",
+      "opacity": 0.15
+    },
+    {
+      "name": "Neutral Zone",
+      "equation": "x >= -12 && x <= 12",
+      "color": "#ffff00",
+      "opacity": 0.1
+    },
+    {
+      "name": "Red Sample Zone",
+      "equation": "x <= -48 && y <= -48",
+      "color": "#ff4d4d",
+      "opacity": 0.3
+    },
+    {
+      "name": "Blue Sample Zone",
+      "equation": "x >= 48 && y >= 48", 
+      "color": "#4da6ff",
+      "opacity": 0.3
+    },
+    {
+      "name": "Red Observation Zone",
+      "equation": "x >= 48 && y <= -48",
+      "color": "#ff9999",
+      "opacity": 0.25
+    },
+    {
+      "name": "Blue Observation Zone",
+      "equation": "x <= -48 && y >= 48",
+      "color": "#99b3ff",
+      "opacity": 0.25
+    }
+  ],
+  "metadata": {
+    "created": "2024-10-03T00:00:00",
+    "modified": "2024-10-03T00:00:00",
+    "description": "Official FTC INTO THE DEEP (2024-25) field configuration with scoring zones, observation areas, and alliance territories."
+  }
+}
