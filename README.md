@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.3.2-blue.svg)](https://github.com/Imagineer7/FTC-Field-Viewer/releases)
 [![Python](https://img.shields.io/badge/python-3.8+-green.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-GNU-orange.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/Imagineer7/FTC-Field-Viewer)
 
 An **interactive application** for visualizing First Tech Challenge (FTC) field maps with advanced measurement tools, coordinate systems, and point management capabilities.
