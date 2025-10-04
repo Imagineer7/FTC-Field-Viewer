@@ -2458,6 +2458,7 @@ class FieldView(QtWidgets.QGraphicsView):
                 self.zone_polygon_cache[zone_key] = self._create_zone_polygon(zone)
             
             zone_polygon = self.zone_polygon_cache[zone_key]
+            
             if zone_polygon and len(zone_polygon) > 2:
                 # Convert to scene coordinates
                 scene_points = []
@@ -2492,19 +2493,21 @@ class FieldView(QtWidgets.QGraphicsView):
             min_x, max_x = -HALF_FIELD, HALF_FIELD
             min_y, max_y = -HALF_FIELD, HALF_FIELD
             
-            # Balance resolution for performance vs accuracy
-            resolution = 3.0  # inches (good balance)
+            # Use finer resolution to catch boundary conditions with decimals
+            resolution = 1.5  # inches (finer resolution for better boundary detection)
             
             # Create a grid of points that satisfy the zone equation
             zone_points = []
             
-            x_range = range(int(min_x), int(max_x) + 1, int(resolution))
-            y_range = range(int(min_y), int(max_y) + 1, int(resolution))
-            
-            for x in x_range:
-                for y in y_range:
-                    if zone.contains_point(float(x), float(y)):
-                        zone_points.append((float(x), float(y)))
+            # Use float ranges for better precision
+            x_current = min_x
+            while x_current <= max_x:
+                y_current = min_y
+                while y_current <= max_y:
+                    if zone.contains_point(float(x_current), float(y_current)):
+                        zone_points.append((float(x_current), float(y_current)))
+                    y_current += resolution
+                x_current += resolution
             
             if len(zone_points) < 3:
                 return []
@@ -4315,6 +4318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Handle field configuration changes from the editor"""
         if hasattr(self, 'field_editor_panel') and self.field_editor_panel:
             config = self.field_editor_panel.get_field_configuration()
+            
             # Update both views with new configuration
             self.view.update_field_configuration(config)
             if hasattr(self, 'editor_view'):

@@ -354,7 +354,7 @@ class PointEditorWidget(QtWidgets.QWidget):
         """Set the field configuration to edit"""
         self.field_config = config
         self._setup_point_list()
-    
+        
     def get_field_config(self) -> FieldConfiguration:
         """Get the current field configuration"""
         return self.field_config
