@@ -1,6 +1,156 @@
 # FTC Field Viewer - Release Notes
 
-## Version 1.3.2 - Precision Measurement Controls (Latest)
+## Version 1.4.0 - Advanced Zone Visualization System (Latest)
+*Released: October 2025*
+
+### **🌟 Major New Features**
+
+#### **Comprehensive Zone System**
+- **Zone Visibility Controls**: Independent zone display toggles for both Viewer and Editor modes
+  - Dedicated "Show Zones" checkboxes in both control panels
+  - Real-time zone rendering toggle without data loss
+  - Separate visibility state for enhanced workflow flexibility
+
+- **Zone Type Classification System**: Intelligent zone categorization with automatic styling
+  - **Alliance Zones**: Red/Blue alliance territory markers (`red_alliance`, `blue_alliance`)
+  - **Neutral Zones**: Shared areas with distinct highlighting (`neutral`)
+  - **Functional Zones**: Launch, parking, loading, and risky area designations
+  - **Custom Zones**: User-defined zones with flexible styling options
+  - **Automatic Color Assignment**: Smart color selection based on zone type
+
+#### **Mathematical Zone Definition Engine**
+- **Equation-Based Boundaries**: Define zones using mathematical expressions
+  - Support for complex inequalities: `x >= 30 && y <= -24.7`
+  - Multi-condition zones: `y <= x - 46 && y >= -x + 46`
+  - Decimal precision: Full support for fractional coordinates
+  - Logical operators: AND (&&), OR (||), comparison operators (>=, <=, >, <, ==, !=)
+
+- **Real-Time Zone Validation**: Instant feedback on zone equation validity
+  - Syntax highlighting and error detection
+  - Live preview of zone boundaries during editing
+  - Comprehensive equation compilation with safety checks
+
+#### **Field Editor Mode**
+- **Dual-Mode Interface**: Seamless switching between Viewer and Editor modes
+  - **Viewer Mode**: Optimized for field analysis and measurement
+  - **Editor Mode**: Complete field configuration creation and modification
+  - Mode-specific toolbars and controls for focused workflows
+  - Persistent settings and layout for each mode
+
+- **Comprehensive Field Configuration Management**
+  - **Point Editor**: Interactive point placement and management
+    - Drag-and-drop point positioning with real-time coordinates
+    - Color picker for custom point styling
+    - Bulk point operations (add, delete, modify multiple points)
+    - Point validation with field boundary checking
+  
+  - **Image Association Manager**: Field image organization system
+    - Multiple image support per configuration
+    - Automatic image path resolution and validation
+    - Image preview and selection interface
+    - Support for standard image formats (PNG, JPG, BMP)
+  
+  - **Advanced Zone Editor**: Professional zone creation and editing
+    - Interactive zone equation builder with syntax assistance
+    - Zone type classification with automatic styling
+    - Real-time zone preview with boundary visualization
+    - Equation validation with helpful error messages
+    - Zone testing tool for coordinate verification
+
+- **Configuration File Management**
+  - **Smart Auto-Loading**: Automatic configuration detection
+    - Intelligent matching of field images to configurations
+    - Seamless loading when switching between field types
+    - Background configuration scanning and indexing
+  
+  - **Save/Load System**: Robust file operations
+    - JSON-based configuration format for portability
+    - Comprehensive metadata tracking (creation, modification dates)
+    - Configuration validation on load with error reporting
+    - Backup and recovery system for configuration safety
+  
+  - **Configuration Library**: Organized config management
+    - Built-in configurations for official FTC seasons
+    - Custom configuration support for practice fields
+    - Configuration browsing with preview and metadata
+    - Export/import functionality for sharing configurations
+
+### **🚀 Performance & Rendering Optimizations**
+
+#### **High-Performance Polygon Generation**
+- **Optimized Sampling Algorithm**: Intelligent field sampling for accurate zone boundaries
+  - High-resolution sampling (1.5-inch precision) for detailed boundary detection
+  - Float-based coordinate sampling for decimal coordinate support
+  - Memory-efficient point collection and processing
+
+- **Smart Polygon Caching System**: Revolutionary performance improvement for zoom operations
+  - **Zone Polygon Cache**: Pre-computed polygons stored for instant rendering
+  - **Intelligent Cache Management**: Automatic cache invalidation on zone changes
+  - **Smooth Zoom Performance**: Eliminates lag during zoom operations with zones visible
+  - **Memory Optimized**: Efficient storage of polygon point arrays
+
+#### **Advanced Convex Hull Algorithm**
+- **Graham Scan Implementation**: Professional-grade polygon generation
+  - Proper polar angle sorting with distance-based tie-breaking
+  - Accurate convex hull computation for complex zone shapes
+  - Intelligent polygon simplification (25-point maximum) for performance
+  - Robust error handling for edge cases and malformed zones
+
+### **🎨 Enhanced Visual Design**
+
+#### **Professional Zone Rendering**
+- **Layered Z-Order System**: Proper visual hierarchy for field elements
+  - Zones render above field image (z-value: 2.5)
+  - Below measurement tools and points for logical layering
+  - Grid and background at base layer (z-value: 0)
+
+- **Advanced Opacity Controls**: Customizable zone transparency
+  - Per-zone opacity settings (default: 0.3 for subtle overlay)
+  - Automatic border enhancement (+0.3 opacity for definition)
+  - Semi-transparent fills that preserve field image visibility
+
+- **Color-Coded Zone System**: Intuitive visual identification
+  - Alliance zones: Red (#ff4d4d) and Blue (#4da6ff) team colors
+  - Neutral zones: Amber (#ffaa00) for shared areas
+  - Functional zones: Orange (#ff8800) for launch, Brown (#cc6600) for parking
+  - Custom zones: Flexible color palette for user-defined areas
+
+### **🔧 Architecture Improvements**
+
+#### **Independent View System**
+- **Separate Scene Management**: Isolated rendering contexts for Viewer and Editor
+  - Independent zone display controls without cross-interference
+  - Separate graphics scenes prevent shared control conflicts
+  - Enhanced editing workflow with mode-specific zone visibility
+
+#### **Robust Configuration Integration**
+- **Field Configuration Auto-Loading**: Intelligent config matching
+  - Automatic zone loading when switching field images
+  - Support for complex field configurations (INTO THE DEEP, DECODE seasons)
+  - Seamless integration with existing point and image systems
+
+- **Enhanced Zone Editor**: Professional zone management interface
+  - Equation syntax validation with real-time feedback
+  - Zone type dropdown with automatic color assignment
+  - Live zone preview during editing and creation
+
+### **🐛 Critical Fixes**
+- **Zone Persistence**: Fixed zones disappearing during overlay rebuilds
+- **Coordinate Precision**: Resolved decimal coordinate boundary detection
+- **Performance Lag**: Eliminated zoom slowdown with polygon caching
+- **Visual Layering**: Fixed zones rendering below field images
+- **Cross-View Interference**: Solved shared controls affecting both views
+
+### **📖 Technical Specifications**
+- **Equation Engine**: Safe mathematical expression evaluation with restricted scope
+- **Coordinate System**: Full FTC field coordinate support (-70.5" to +70.5")
+- **Polygon Complexity**: Up to 25 points per zone for optimal performance
+- **Cache Efficiency**: O(1) polygon lookup during zoom operations
+- **Memory Usage**: Minimal overhead with intelligent cache management
+
+---
+
+## Version 1.3.2 - Precision Measurement Controls
 *Released: October 2025*
 
 ### **New Features**

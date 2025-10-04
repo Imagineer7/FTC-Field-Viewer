@@ -6,7 +6,7 @@
 #see https://semver.org/ for semantic versioning guidelines.
 #When making changes, please update the RELEASE_NOTES.md file with a summary of changes.
 
-__version__ = "1.3.1"
+__version__ = "1.4.1"
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QRect, QSettings, QStandardPaths
@@ -16,7 +16,16 @@ import math
 import os
 import sys
 import argparse
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+# Import field editor components
+try:
+    from field_editor import FieldEditorPanel, FieldConfiguration, Zone
+except ImportError:
+    # Handle case where field editor is not available
+    FieldEditorPanel = None
+    FieldConfiguration = None
+    Zone = None
 
 FIELD_SIZE_IN = 141.0
 HALF_FIELD = FIELD_SIZE_IN / 2.0
@@ -478,8 +487,18 @@ class FieldView(QtWidgets.QGraphicsView):
         self.dragging_point = False
         self.drag_point_index = -1
 
-        self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
-        self.scene().addItem(self.image_item)
+        # Check if image already exists in scene (for shared scenes)
+        existing_image_items = [item for item in self.scene().items() if isinstance(item, QtWidgets.QGraphicsPixmapItem)]
+        if existing_image_items:
+            # Use existing image item
+            self.image_item = existing_image_items[0]
+            self.image_item.setZValue(0)  # Ensure image is at the background
+        else:
+            # Create new image item
+            self.image_item = QtWidgets.QGraphicsPixmapItem(image_pixmap)
+            self.image_item.setZValue(0)  # Ensure image is at the background
+            self.scene().addItem(self.image_item)
+        
         self.current_image_path = image_path
 
         self.grid_opacity = 0.5
@@ -495,6 +514,8 @@ class FieldView(QtWidgets.QGraphicsView):
         self.selected_index = -1
         self.show_labels = True
         self.show_default_points = True    # Control visibility of default points
+        self.show_zones = True              # Control visibility of field zones
+        self.zone_polygon_cache = {}        # Cache for zone polygons to improve performance
         
         # Vector management
         self.vectors = []                   # list of dicts with name,x,y,magnitude,direction,color
@@ -513,6 +534,19 @@ class FieldView(QtWidgets.QGraphicsView):
         self.measurement_items = []         # Visual items for measurements
         self.show_pixel_coords = False     # Toggle between field and pixel coordinates
         self.measurement_snap_to_grid = True  # Whether measurements snap to grid
+        
+        # Path Planning System
+        self.path_mode = False              # Toggle path planning mode
+        self.robot_paths = []               # List of robot paths (sequences of points)
+        self.current_path = []              # Current path being created
+        self.path_items = []                # Visual items for paths
+        self.robot_width = 18.0             # Robot width in inches (default)
+        self.robot_length = 18.0            # Robot length in inches (default)
+        
+        # Analytics & Reporting
+        self.measurement_history = []       # Saved measurement sessions
+        self.analytics_data = {}            # Cached analytics calculations
+        self.field_statistics = {}          # Field coverage and distribution stats
         
         # Cursor-following snap point
         self.cursor_point = None
@@ -777,9 +811,10 @@ class FieldView(QtWidgets.QGraphicsView):
 
     # --- Grid and points drawing ---
     def _clear_overlays(self):
-        # Remove all but image
+        # Remove all but image items
         for item in list(self.scene().items()):
-            if item is self.image_item:
+            # Keep all QGraphicsPixmapItem instances (field images)
+            if isinstance(item, QtWidgets.QGraphicsPixmapItem):
                 continue
             self.scene().removeItem(item)
 
@@ -790,6 +825,7 @@ class FieldView(QtWidgets.QGraphicsView):
         self._draw_vectors()
         self._draw_lines()
         self._draw_cursor_point()
+        self._update_zone_display()  # Redraw zones after clearing overlays
 
     def _draw_grid(self):
         iw = self.image_rect.width()
@@ -1239,7 +1275,19 @@ class FieldView(QtWidgets.QGraphicsView):
                 self.add_measurement_point(field_x, field_y)
                 # Area measurement continues until user switches tools or disables measurement mode
         
-        elif event.button() == QtCore.Qt.MouseButton.LeftButton and not self.measurement_mode:
+        elif event.button() == QtCore.Qt.MouseButton.LeftButton and self.path_mode:
+            # Handle path planning clicks
+            scene_pos = self.mapToScene(event.position().toPoint())
+            field_x, field_y = self.scene_to_field(scene_pos)
+            
+            # Apply snapping for path planning too
+            if self.measurement_snap_to_grid and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier):
+                snap_resolution = self._get_current_grid_spacing()
+                field_x, field_y = self.snap_to_grid(field_x, field_y, snap_resolution)
+            
+            self.add_path_point(field_x, field_y)
+        
+        elif event.button() == QtCore.Qt.MouseButton.LeftButton and not self.measurement_mode and not self.path_mode:
             # Check if we're clicking on a point for dragging
             field_x, field_y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
             point_index = self._find_point_at_position(field_x, field_y)
@@ -1256,12 +1304,16 @@ class FieldView(QtWidgets.QGraphicsView):
                 # Normal view interaction
                 self.setDragMode(QtWidgets.QGraphicsView.DragMode.ScrollHandDrag)
                 
-        elif event.button() == QtCore.Qt.MouseButton.RightButton and not self.measurement_mode:
-            # Show context menu for point creation (only when not in measurement mode)
+        elif event.button() == QtCore.Qt.MouseButton.RightButton and not self.measurement_mode and not self.path_mode:
+            # Show context menu for point creation (only when not in measurement/path mode)
             self._show_context_menu(event.globalPosition().toPoint())
         elif event.button() == QtCore.Qt.MouseButton.RightButton and self.measurement_mode:
             # Right-click in measurement mode clears current measurement
             self.clear_current_measurement()
+        elif event.button() == QtCore.Qt.MouseButton.RightButton and self.path_mode:
+            # Right-click in path mode finishes current path
+            if len(self.current_path) >= 2:
+                self.finish_current_path()
             
         super().mousePressEvent(event)
 
@@ -1478,6 +1530,11 @@ class FieldView(QtWidgets.QGraphicsView):
         self.show_default_points = show
         self._rebuild_overlays()
         self.pointsReloaded.emit()  # Notify control panel to refresh
+    
+    def set_show_zones(self, show: bool):
+        """Control visibility of field zones"""
+        self.show_zones = show
+        self._update_zone_display()
 
     def add_point(self, name, x, y, color="#ffd166"):
         self.user_points.append({"name": name, "x": float(x), "y": float(y), "color": color})
@@ -1669,7 +1726,15 @@ class FieldView(QtWidgets.QGraphicsView):
         p1 = self.field_to_scene(*self.measurement_points[0])
         p2 = self.field_to_scene(*self.measurement_points[1])
         
-        # Draw line
+        # Draw line with outline for better visibility
+        # Draw outline first (thicker, black)
+        outline_pen = QtGui.QPen(QtGui.QColor("#000000"), 4.0)
+        outline_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        outline_line = self.scene().addLine(p1.x(), p1.y(), p2.x(), p2.y(), outline_pen)
+        outline_line.setZValue(9)  # Behind main line
+        self.measurement_items.append(outline_line)
+        
+        # Draw main line (on top of outline)
         pen = QtGui.QPen(QtGui.QColor("#ff6b6b"), 2.0)
         pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         line = self.scene().addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
@@ -1681,13 +1746,27 @@ class FieldView(QtWidgets.QGraphicsView):
         x2, y2 = self.measurement_points[1]
         distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
         
-        # Draw measurement label
+        # Draw measurement label with outline for better visibility
         mid_x = (p1.x() + p2.x()) / 2
         mid_y = (p1.y() + p2.y()) / 2
         
-        label = self.scene().addText(f"{distance:.2f} in")
+        font = QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold)
+        text = f"{distance:.2f} in"
+        
+        # Draw text outline (multiple offset shadows for strong outline effect)
+        outline_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        for dx, dy in outline_offsets:
+            outline_label = self.scene().addText(text)
+            outline_label.setDefaultTextColor(QtGui.QColor("#000000"))  # Black outline
+            outline_label.setFont(font)
+            outline_label.setPos(mid_x + dx, mid_y - 20 + dy)
+            outline_label.setZValue(10)  # Behind main text
+            self.measurement_items.append(outline_label)
+        
+        # Draw main text (on top of outline)
+        label = self.scene().addText(text)
         label.setDefaultTextColor(QtGui.QColor("#ff6b6b"))
-        label.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold))
+        label.setFont(font)
         label.setPos(mid_x, mid_y - 20)
         label.setZValue(11)
         self.measurement_items.append(label)
@@ -1707,7 +1786,18 @@ class FieldView(QtWidgets.QGraphicsView):
         p2 = self.field_to_scene(*p2_field)
         p3 = self.field_to_scene(*p3_field)
         
-        # Draw lines from vertex to other points
+        # Draw lines from vertex to other points with outlines
+        # Draw outline lines first (thicker, black)
+        outline_pen = QtGui.QPen(QtGui.QColor("#000000"), 4.0)
+        outline_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        
+        outline_line1 = self.scene().addLine(p2.x(), p2.y(), p1.x(), p1.y(), outline_pen)
+        outline_line2 = self.scene().addLine(p2.x(), p2.y(), p3.x(), p3.y(), outline_pen)
+        outline_line1.setZValue(9)  # Behind main lines
+        outline_line2.setZValue(9)
+        self.measurement_items.extend([outline_line1, outline_line2])
+        
+        # Draw main lines (on top of outline)
         pen = QtGui.QPen(QtGui.QColor("#ff6b6b"), 2.0)
         pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         
@@ -1728,10 +1818,24 @@ class FieldView(QtWidgets.QGraphicsView):
             angle_diff = 2 * math.pi - angle_diff
         angle_degrees = math.degrees(angle_diff)
         
-        # Draw angle label
-        label = self.scene().addText(f"{angle_degrees:.1f}°")
+        # Draw angle label with outline for better visibility
+        font = QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold)
+        text = f"{angle_degrees:.1f}°"
+        
+        # Draw text outline
+        outline_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        for dx, dy in outline_offsets:
+            outline_label = self.scene().addText(text)
+            outline_label.setDefaultTextColor(QtGui.QColor("#000000"))  # Black outline
+            outline_label.setFont(font)
+            outline_label.setPos(p2.x() + 15 + dx, p2.y() - 15 + dy)
+            outline_label.setZValue(10)  # Behind main text
+            self.measurement_items.append(outline_label)
+        
+        # Draw main text (on top of outline)
+        label = self.scene().addText(text)
         label.setDefaultTextColor(QtGui.QColor("#ff6b6b"))
-        label.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold))
+        label.setFont(font)
         label.setPos(p2.x() + 15, p2.y() - 15)
         label.setZValue(11)
         self.measurement_items.append(label)
@@ -1765,14 +1869,28 @@ class FieldView(QtWidgets.QGraphicsView):
             area -= self.measurement_points[j][0] * self.measurement_points[i][1]
         area = abs(area) / 2.0
         
-        # Draw area label at centroid
+        # Draw area label at centroid with outline for better visibility
         cx = sum(pt[0] for pt in self.measurement_points) / len(self.measurement_points)
         cy = sum(pt[1] for pt in self.measurement_points) / len(self.measurement_points)
         center_scene = self.field_to_scene(cx, cy)
         
-        label = self.scene().addText(f"{area:.1f} sq in")
+        font = QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold)
+        text = f"{area:.1f} sq in"
+        
+        # Draw text outline
+        outline_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        for dx, dy in outline_offsets:
+            outline_label = self.scene().addText(text)
+            outline_label.setDefaultTextColor(QtGui.QColor("#000000"))  # Black outline
+            outline_label.setFont(font)
+            outline_label.setPos(center_scene.x() - 30 + dx, center_scene.y() - 10 + dy)
+            outline_label.setZValue(10)  # Behind main text
+            self.measurement_items.append(outline_label)
+        
+        # Draw main text (on top of outline)
+        label = self.scene().addText(text)
         label.setDefaultTextColor(QtGui.QColor("#ff6b6b"))
-        label.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Weight.Bold))
+        label.setFont(font)
         label.setPos(center_scene.x() - 30, center_scene.y() - 10)
         label.setZValue(11)
         self.measurement_items.append(label)
@@ -1795,6 +1913,484 @@ class FieldView(QtWidgets.QGraphicsView):
         distance = abs(A * px + B * py + C) / math.sqrt(A * A + B * B)
         return distance
 
+    # === PATH PLANNING SYSTEM ===
+    
+    def set_path_mode(self, enabled: bool):
+        """Enable or disable path planning mode"""
+        self.path_mode = enabled
+        if not enabled:
+            self.clear_current_path()
+    
+    def set_robot_dimensions(self, width: float, length: float):
+        """Set robot dimensions for path planning"""
+        self.robot_width = max(1.0, width)
+        self.robot_length = max(1.0, length)
+    
+    def add_path_point(self, field_x: float, field_y: float):
+        """Add a point to the current robot path"""
+        self.current_path.append((field_x, field_y))
+        self._update_path_display()
+    
+    def finish_current_path(self, name: str | None = None):
+        """Finish the current path and add it to the saved paths"""
+        if len(self.current_path) >= 2:
+            path_data = {
+                "name": name or f"Path {len(self.robot_paths) + 1}",
+                "points": self.current_path.copy(),
+                "total_distance": self._calculate_path_distance(self.current_path),
+                "turn_angles": self._calculate_path_turns(self.current_path),
+                "created": QtCore.QDateTime.currentDateTime().toString()
+            }
+            self.robot_paths.append(path_data)
+            self.clear_current_path()
+            return path_data
+        return None
+    
+    def clear_current_path(self):
+        """Clear the current path being created"""
+        self.current_path.clear()
+        self._update_path_display()
+    
+    def clear_all_paths(self):
+        """Clear all saved robot paths"""
+        self.robot_paths.clear()
+        for item in self.path_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
+        self.path_items.clear()
+    
+    def _update_path_display(self):
+        """Update the visual display of robot paths"""
+        # Clear previous path visuals
+        for item in self.path_items:
+            if item.scene() == self.scene():
+                self.scene().removeItem(item)
+        self.path_items.clear()
+        
+        # Draw saved paths
+        for i, path_data in enumerate(self.robot_paths):
+            self._draw_robot_path(path_data["points"], i)
+        
+        # Draw current path being created
+        if len(self.current_path) > 1:
+            self._draw_robot_path(self.current_path, -1, is_current=True)
+    
+    def _draw_robot_path(self, path_points: list, path_index: int, is_current: bool = False):
+        """Draw a robot path with turn indicators"""
+        if len(path_points) < 2:
+            return
+        
+        # Use different colors for different paths
+        colors = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0", "#F44336", "#00BCD4"]
+        path_color = "#FFD700" if is_current else colors[path_index % len(colors)]
+        
+        pen = QtGui.QPen(QtGui.QColor(path_color), 3.0)
+        if is_current:
+            pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        
+        # Draw path segments
+        for i in range(len(path_points) - 1):
+            start_field = path_points[i]
+            end_field = path_points[i + 1]
+            
+            start_scene = self.field_to_scene(*start_field)
+            end_scene = self.field_to_scene(*end_field)
+            
+            # Draw outline (thicker, darker line for contrast)
+            outline_pen = QtGui.QPen(QtGui.QColor("#000000"), 5.0)  # Black outline
+            if is_current:
+                outline_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+            
+            outline = self.scene().addLine(start_scene.x(), start_scene.y(), 
+                                         end_scene.x(), end_scene.y(), outline_pen)
+            outline.setZValue(7)  # Behind the main line
+            self.path_items.append(outline)
+            
+            # Draw main line (on top of outline)
+            main_pen = QtGui.QPen(QtGui.QColor(path_color), 3.0)
+            if is_current:
+                main_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+            
+            line = self.scene().addLine(start_scene.x(), start_scene.y(), 
+                                      end_scene.x(), end_scene.y(), main_pen)
+            line.setZValue(8)
+            self.path_items.append(line)
+            
+            # Add arrow heads
+            self._add_arrow_head(start_scene, end_scene, path_color)
+        
+        # Draw waypoint circles
+        for i, point_field in enumerate(path_points):
+            point_scene = self.field_to_scene(*point_field)
+            radius = 6 if is_current else 4
+            
+            # Draw outline circle (larger, darker)
+            outline_pen = QtGui.QPen(QtGui.QColor("#000000"), 3.0)
+            outline_brush = QtGui.QBrush(QtGui.QColor("#000000"))
+            outline_radius = radius + 1
+            
+            outline_circle = self.scene().addEllipse(point_scene.x() - outline_radius, point_scene.y() - outline_radius,
+                                                   outline_radius * 2, outline_radius * 2, outline_pen, outline_brush)
+            outline_circle.setZValue(8)  # Behind main circle
+            self.path_items.append(outline_circle)
+            
+            # Draw main circle (on top of outline)
+            point_pen = QtGui.QPen(QtGui.QColor(path_color), 2.0)
+            point_brush = QtGui.QBrush(QtGui.QColor(path_color))
+            
+            circle = self.scene().addEllipse(point_scene.x() - radius, point_scene.y() - radius,
+                                           radius * 2, radius * 2, point_pen, point_brush)
+            circle.setZValue(9)
+            self.path_items.append(circle)
+            
+            # Add waypoint numbers
+            if not is_current:
+                # Create text with outline for better visibility
+                font = QtGui.QFont("Arial", 8, QtGui.QFont.Weight.Bold)
+                
+                # Draw text outline (multiple offset shadows for strong outline effect)
+                outline_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+                for dx, dy in outline_offsets:
+                    outline_label = self.scene().addText(str(i + 1))
+                    outline_label.setDefaultTextColor(QtGui.QColor("#000000"))  # Black outline
+                    outline_label.setFont(font)
+                    outline_label.setPos(point_scene.x() + 8 + dx, point_scene.y() - 8 + dy)
+                    outline_label.setZValue(9)  # Behind main text
+                    self.path_items.append(outline_label)
+                
+                # Draw main text (on top of outline)
+                label = self.scene().addText(str(i + 1))
+                label.setDefaultTextColor(QtGui.QColor(path_color))
+                label.setFont(font)
+                label.setPos(point_scene.x() + 8, point_scene.y() - 8)
+                label.setZValue(10)
+                self.path_items.append(label)
+    
+    def _add_arrow_head(self, start: QtCore.QPointF, end: QtCore.QPointF, color: str):
+        """Add arrow head to show path direction with contrasting outline"""
+        # Calculate arrow head points
+        angle = math.atan2(end.y() - start.y(), end.x() - start.x())
+        arrow_length = 12
+        arrow_angle = math.pi / 6  # 30 degrees
+        
+        # Arrow head points
+        x1 = end.x() - arrow_length * math.cos(angle - arrow_angle)
+        y1 = end.y() - arrow_length * math.sin(angle - arrow_angle)
+        x2 = end.x() - arrow_length * math.cos(angle + arrow_angle)
+        y2 = end.y() - arrow_length * math.sin(angle + arrow_angle)
+        
+        # Create arrow head polygon
+        arrow = QtGui.QPolygonF([
+            QtCore.QPointF(end.x(), end.y()),
+            QtCore.QPointF(x1, y1),
+            QtCore.QPointF(x2, y2)
+        ])
+        
+        # Draw outline arrow (larger, black)
+        outline_pen = QtGui.QPen(QtGui.QColor("#000000"), 3.0)
+        outline_brush = QtGui.QBrush(QtGui.QColor("#000000"))
+        
+        # Create slightly larger arrow for outline
+        outline_offset = 1.5
+        outline_x1 = end.x() - (arrow_length + outline_offset) * math.cos(angle - arrow_angle)
+        outline_y1 = end.y() - (arrow_length + outline_offset) * math.sin(angle - arrow_angle)
+        outline_x2 = end.x() - (arrow_length + outline_offset) * math.cos(angle + arrow_angle)
+        outline_y2 = end.y() - (arrow_length + outline_offset) * math.sin(angle + arrow_angle)
+        
+        outline_arrow = QtGui.QPolygonF([
+            QtCore.QPointF(end.x(), end.y()),
+            QtCore.QPointF(outline_x1, outline_y1),
+            QtCore.QPointF(outline_x2, outline_y2)
+        ])
+        
+        outline_arrow_item = self.scene().addPolygon(outline_arrow, outline_pen, outline_brush)
+        outline_arrow_item.setZValue(8)  # Behind main arrow
+        self.path_items.append(outline_arrow_item)
+        
+        # Draw main arrow (on top of outline)
+        main_pen = QtGui.QPen(QtGui.QColor(color), 2.0)
+        main_brush = QtGui.QBrush(QtGui.QColor(color))
+        
+        arrow_item = self.scene().addPolygon(arrow, main_pen, main_brush)
+        arrow_item.setZValue(9)
+        self.path_items.append(arrow_item)
+    
+    def _calculate_path_distance(self, path_points: list) -> float:
+        """Calculate total distance of a path"""
+        if len(path_points) < 2:
+            return 0.0
+        
+        total_distance = 0.0
+        for i in range(len(path_points) - 1):
+            x1, y1 = path_points[i]
+            x2, y2 = path_points[i + 1]
+            segment_distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            total_distance += segment_distance
+        
+        return total_distance
+    
+    def _calculate_path_turns(self, path_points: list) -> list:
+        """Calculate turn angles at each waypoint"""
+        if len(path_points) < 3:
+            return []
+        
+        turn_angles = []
+        for i in range(1, len(path_points) - 1):
+            # Get three consecutive points
+            p1 = path_points[i - 1]
+            p2 = path_points[i]     # Turn point
+            p3 = path_points[i + 1]
+            
+            # Calculate vectors
+            v1 = (p1[0] - p2[0], p1[1] - p2[1])
+            v2 = (p3[0] - p2[0], p3[1] - p2[1])
+            
+            # Calculate turn angle
+            angle1 = math.atan2(v1[1], v1[0])
+            angle2 = math.atan2(v2[1], v2[0])
+            turn_angle = angle2 - angle1
+            
+            # Normalize to [-π, π]
+            if turn_angle > math.pi:
+                turn_angle -= 2 * math.pi
+            elif turn_angle < -math.pi:
+                turn_angle += 2 * math.pi
+            
+            turn_angles.append(math.degrees(turn_angle))
+        
+        return turn_angles
+    
+    def export_path_data(self, file_path: str, format_type: str = "csv"):
+        """Export robot path data to file"""
+        import csv
+        import json
+        
+        if format_type.lower() == "csv":
+            with open(file_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(["Path Name", "Waypoint", "X (inches)", "Y (inches)", "Distance to Next", "Turn Angle"])
+                
+                for path_data in self.robot_paths:
+                    path_name = path_data["name"]
+                    points = path_data["points"]
+                    turn_angles = path_data["turn_angles"]
+                    
+                    for i, (x, y) in enumerate(points):
+                        distance_to_next = 0.0
+                        if i < len(points) - 1:
+                            next_point = points[i + 1]
+                            distance_to_next = math.sqrt((next_point[0] - x) ** 2 + (next_point[1] - y) ** 2)
+                        
+                        turn_angle = turn_angles[i - 1] if 0 < i < len(turn_angles) + 1 else 0.0
+                        
+                        writer.writerow([path_name, i + 1, f"{x:.2f}", f"{y:.2f}", 
+                                       f"{distance_to_next:.2f}", f"{turn_angle:.1f}"])
+        
+        elif format_type.lower() == "json":
+            export_data = {
+                "robot_dimensions": {"width": self.robot_width, "length": self.robot_length},
+                "paths": self.robot_paths,
+                "exported": QtCore.QDateTime.currentDateTime().toString()
+            }
+            with open(file_path, 'w') as jsonfile:
+                json.dump(export_data, jsonfile, indent=2)
+    
+    # === ANALYTICS & REPORTING ===
+    
+    def calculate_field_statistics(self) -> dict:
+        """Calculate comprehensive field statistics"""
+        if not self.points:
+            return {}
+        
+        # Basic point statistics
+        x_coords = [pt["x"] for pt in self.points]
+        y_coords = [pt["y"] for pt in self.points]
+        
+        stats = {
+            "total_points": len(self.points),
+            "x_range": {"min": min(x_coords), "max": max(x_coords), "span": max(x_coords) - min(x_coords)},
+            "y_range": {"min": min(y_coords), "max": max(y_coords), "span": max(y_coords) - min(y_coords)},
+            "centroid": {"x": sum(x_coords) / len(x_coords), "y": sum(y_coords) / len(y_coords)},
+            "field_coverage": self._calculate_field_coverage(),
+            "point_density": len(self.points) / (144.0 * 144.0),  # points per square inch
+            "distance_matrix": self._calculate_distance_matrix()
+        }
+        
+        # Path statistics
+        if self.robot_paths:
+            path_stats = {
+                "total_paths": len(self.robot_paths),
+                "total_path_distance": sum(path["total_distance"] for path in self.robot_paths),
+                "average_path_length": sum(path["total_distance"] for path in self.robot_paths) / len(self.robot_paths),
+                "total_waypoints": sum(len(path["points"]) for path in self.robot_paths)
+            }
+            stats["path_statistics"] = path_stats
+        
+        self.field_statistics = stats
+        return stats
+    
+    def _calculate_field_coverage(self) -> float:
+        """Calculate what percentage of the field has points nearby"""
+        if not self.points:
+            return 0.0
+        
+        # Create a grid and check coverage
+        grid_size = 12  # inches
+        field_size = 144  # 12 feet in inches
+        grid_count = int(field_size / grid_size)
+        covered_cells = 0
+        
+        for i in range(grid_count):
+            for j in range(grid_count):
+                cell_x = i * grid_size + grid_size / 2
+                cell_y = j * grid_size + grid_size / 2
+                
+                # Check if any point is within coverage radius of this cell
+                coverage_radius = grid_size * 0.7  # 70% of grid size
+                for point in self.points:
+                    distance = math.sqrt((point["x"] - cell_x) ** 2 + (point["y"] - cell_y) ** 2)
+                    if distance <= coverage_radius:
+                        covered_cells += 1
+                        break
+        
+        return (covered_cells / (grid_count * grid_count)) * 100.0
+    
+    def _calculate_distance_matrix(self) -> list:
+        """Calculate distances between all points"""
+        if len(self.points) < 2:
+            return []
+        
+        matrix = []
+        for i, point1 in enumerate(self.points):
+            row = []
+            for j, point2 in enumerate(self.points):
+                if i == j:
+                    distance = 0.0
+                else:
+                    distance = math.sqrt((point1["x"] - point2["x"]) ** 2 + 
+                                       (point1["y"] - point2["y"]) ** 2)
+                row.append(distance)
+            matrix.append(row)
+        
+        return matrix
+    
+    def save_measurement_session(self, name: str | None = None) -> dict:
+        """Save current measurements as a session"""
+        session_data = {
+            "name": name or f"Session {len(self.measurement_history) + 1}",
+            "timestamp": QtCore.QDateTime.currentDateTime().toString(),
+            "measurements": [],
+            "field_image": getattr(self, 'current_image_path', ''),
+            "points_snapshot": self.points.copy(),
+            "statistics": self.calculate_field_statistics()
+        }
+        
+        # Capture current measurement if any
+        if self.measurement_points:
+            measurement = {
+                "tool": self.measurement_tool,
+                "points": self.measurement_points.copy(),
+                "result": self._get_measurement_result()
+            }
+            session_data["measurements"].append(measurement)
+        
+        self.measurement_history.append(session_data)
+        return session_data
+    
+    def _get_measurement_result(self) -> dict:
+        """Get the numerical result of current measurement"""
+        if self.measurement_tool == "distance" and len(self.measurement_points) >= 2:
+            p1, p2 = self.measurement_points[0], self.measurement_points[1]
+            distance = math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+            return {"distance": distance, "unit": "inches"}
+        
+        elif self.measurement_tool == "angle" and len(self.measurement_points) >= 3:
+            p1, p2, p3 = self.measurement_points[0], self.measurement_points[1], self.measurement_points[2]
+            x1, y1 = p1[0] - p2[0], p1[1] - p2[1]
+            x2, y2 = p3[0] - p2[0], p3[1] - p2[1]
+            angle1 = math.atan2(y1, x1)
+            angle2 = math.atan2(y2, x2)
+            angle_diff = abs(angle2 - angle1)
+            if angle_diff > math.pi:
+                angle_diff = 2 * math.pi - angle_diff
+            return {"angle": math.degrees(angle_diff), "unit": "degrees"}
+        
+        elif self.measurement_tool == "area" and len(self.measurement_points) >= 3:
+            area = 0.0
+            n = len(self.measurement_points)
+            for i in range(n):
+                j = (i + 1) % n
+                area += self.measurement_points[i][0] * self.measurement_points[j][1]
+                area -= self.measurement_points[j][0] * self.measurement_points[i][1]
+            area = abs(area) / 2.0
+            return {"area": area, "unit": "square inches"}
+        
+        return {}
+    
+    def export_analytics_report(self, file_path: str, format_type: str = "csv"):
+        """Export comprehensive analytics report"""
+        import csv
+        import json
+        from datetime import datetime
+        
+        stats = self.calculate_field_statistics()
+        
+        if format_type.lower() == "csv":
+            with open(file_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                # Header
+                writer.writerow(["FTC Field Viewer - Analytics Report"])
+                writer.writerow(["Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+                writer.writerow([])
+                
+                # Field Statistics
+                writer.writerow(["FIELD STATISTICS"])
+                writer.writerow(["Total Points:", stats.get("total_points", 0)])
+                writer.writerow(["Field Coverage:", f"{stats.get('field_coverage', 0):.1f}%"])
+                writer.writerow(["Point Density:", f"{stats.get('point_density', 0):.6f} points/sq_in"])
+                
+                if "centroid" in stats:
+                    writer.writerow(["Centroid X:", f"{stats['centroid']['x']:.2f} inches"])
+                    writer.writerow(["Centroid Y:", f"{stats['centroid']['y']:.2f} inches"])
+                
+                writer.writerow([])
+                
+                # Path Statistics
+                if "path_statistics" in stats:
+                    path_stats = stats["path_statistics"]
+                    writer.writerow(["PATH STATISTICS"])
+                    writer.writerow(["Total Paths:", path_stats.get("total_paths", 0)])
+                    writer.writerow(["Total Distance:", f"{path_stats.get('total_path_distance', 0):.2f} inches"])
+                    writer.writerow(["Average Path Length:", f"{path_stats.get('average_path_length', 0):.2f} inches"])
+                    writer.writerow(["Total Waypoints:", path_stats.get("total_waypoints", 0)])
+                    writer.writerow([])
+                
+                # Measurement History
+                writer.writerow(["MEASUREMENT HISTORY"])
+                writer.writerow(["Session", "Timestamp", "Tool", "Result", "Unit"])
+                for session in self.measurement_history:
+                    for measurement in session.get("measurements", []):
+                        result = measurement.get("result", {})
+                        value = next(iter(result.values())) if result else ""
+                        unit = result.get("unit", "")
+                        writer.writerow([session["name"], session["timestamp"], 
+                                       measurement["tool"], f"{value:.2f}" if isinstance(value, (int, float)) else value, unit])
+        
+        elif format_type.lower() == "json":
+            export_data = {
+                "report_metadata": {
+                    "generated": datetime.now().isoformat(),
+                    "field_image": getattr(self, 'current_image_path', ''),
+                    "robot_dimensions": {"width": self.robot_width, "length": self.robot_length}
+                },
+                "field_statistics": stats,
+                "measurement_history": self.measurement_history,
+                "robot_paths": self.robot_paths
+            }
+            with open(file_path, 'w') as jsonfile:
+                json.dump(export_data, jsonfile, indent=2)
+
     def export_snapshot(self, path):
         # Render the current scene view to an image
         img = QtGui.QImage(self.viewport().size(), QtGui.QImage.Format.Format_ARGB32)
@@ -1802,6 +2398,179 @@ class FieldView(QtWidgets.QGraphicsView):
         self.render(painter)
         painter.end()
         img.save(path)
+
+    def update_field_configuration(self, config):
+        """Update field with configuration from field editor"""
+        if not hasattr(config, 'points') or not hasattr(config, 'zones'):
+            return
+            
+        # Update default points - ensure proper format
+        self.default_points = []
+        for point in config.points:
+            if isinstance(point, dict) and all(key in point for key in ['name', 'x', 'y', 'color']):
+                self.default_points.append(point.copy())
+        
+        # Store zones for rendering
+        if not hasattr(self, 'field_zones'):
+            self.field_zones = []
+        self.field_zones = config.zones.copy() if hasattr(config.zones, 'copy') else list(config.zones)
+        
+        # Clear zone polygon cache when configuration changes
+        if hasattr(self, 'zone_polygon_cache'):
+            self.zone_polygon_cache.clear()
+        
+        # Reset selected index to avoid stale selections
+        self.selected_index = -1
+        
+        # Force complete refresh
+        self._rebuild_overlays()
+        self._update_zone_display()
+        
+        # Emit signal to notify of points reload
+        self.pointsReloaded.emit()
+    
+    def _update_zone_display(self):
+        """Update zone visualization on the field"""
+        # Remove existing zone items
+        if hasattr(self, 'zone_items'):
+            for item in self.zone_items:
+                if item.scene():
+                    self.scene().removeItem(item)
+        
+        self.zone_items = []
+        
+        # Check if zones should be shown
+        if not hasattr(self, 'show_zones') or not self.show_zones:
+            return
+            
+        if not hasattr(self, 'field_zones'):
+            return
+        
+        # Draw zones using cached polygons for better performance
+        for zone in self.field_zones:
+            if not zone.is_valid:
+                continue
+            
+            # Check cache for this zone's polygon
+            zone_key = f"{zone.name}_{zone.equation}"
+            if zone_key not in self.zone_polygon_cache:
+                # Generate and cache the polygon
+                self.zone_polygon_cache[zone_key] = self._create_zone_polygon(zone)
+            
+            zone_polygon = self.zone_polygon_cache[zone_key]
+            
+            if zone_polygon and len(zone_polygon) > 2:
+                # Convert to scene coordinates
+                scene_points = []
+                for x, y in zone_polygon:
+                    scene_point = self.field_to_scene(x, y)
+                    scene_points.append(scene_point)
+                
+                # Create polygon item
+                qt_polygon = QtGui.QPolygonF(scene_points)
+                polygon_item = self.scene().addPolygon(qt_polygon)
+                
+                # Set zone appearance
+                zone_color = QtGui.QColor(zone.color)
+                zone_color.setAlphaF(zone.opacity)
+                polygon_item.setBrush(QtGui.QBrush(zone_color))
+                
+                # Set border
+                border_color = QtGui.QColor(zone.color)
+                border_color.setAlphaF(min(1.0, zone.opacity + 0.3))
+                polygon_item.setPen(QtGui.QPen(border_color, 1))
+                
+                polygon_item.setZValue(2.5)  # Above grid and image, below measurement lines but clearly visible
+                self.zone_items.append(polygon_item)
+    
+    def _create_zone_polygon(self, zone) -> List[Tuple[float, float]]:
+        """Create a polygon representation of a zone by sampling the field"""
+        if not zone.is_valid:
+            return []
+        
+        try:
+            # Define field boundaries
+            min_x, max_x = -HALF_FIELD, HALF_FIELD
+            min_y, max_y = -HALF_FIELD, HALF_FIELD
+            
+            # Use finer resolution to catch boundary conditions with decimals
+            resolution = 1.5  # inches (finer resolution for better boundary detection)
+            
+            # Create a grid of points that satisfy the zone equation
+            zone_points = []
+            
+            # Use float ranges for better precision
+            x_current = min_x
+            while x_current <= max_x:
+                y_current = min_y
+                while y_current <= max_y:
+                    if zone.contains_point(float(x_current), float(y_current)):
+                        zone_points.append((float(x_current), float(y_current)))
+                    y_current += resolution
+                x_current += resolution
+            
+            if len(zone_points) < 3:
+                return []
+            
+            # Proper convex hull algorithm for accurate shapes
+            def convex_hull(points):
+                if len(points) < 3:
+                    return points
+                    
+                # Find the bottom-most point (and left-most in case of tie)
+                bottom = min(points, key=lambda p: (p[1], p[0]))
+                
+                # Sort points by polar angle with respect to bottom point
+                def polar_angle(p):
+                    dx = p[0] - bottom[0]
+                    dy = p[1] - bottom[1]
+                    if dx == 0 and dy == 0:
+                        return -math.pi  # Bottom point itself
+                    return math.atan2(dy, dx)
+                
+                def distance_from_bottom(p):
+                    dx = p[0] - bottom[0]
+                    dy = p[1] - bottom[1]
+                    return dx * dx + dy * dy
+                
+                # Sort by angle, then by distance for collinear points
+                sorted_points = sorted(points, key=lambda p: (polar_angle(p), distance_from_bottom(p)))
+                
+                # Build convex hull using Graham scan
+                hull = []
+                for p in sorted_points:
+                    # Remove points that create a clockwise turn
+                    while len(hull) > 1:
+                        # Calculate cross product
+                        o = ((hull[-1][0] - hull[-2][0]) * (p[1] - hull[-2][1]) - 
+                             (hull[-1][1] - hull[-2][1]) * (p[0] - hull[-2][0]))
+                        if o <= 0:  # Clockwise or collinear - remove the middle point
+                            hull.pop()
+                        else:
+                            break
+                    hull.append(p)
+                
+                return hull
+            
+            # Create proper convex hull but limit points for performance
+            hull_points = convex_hull(zone_points)
+            
+            # If too many points, simplify by keeping every nth point
+            if len(hull_points) > 25:
+                step = len(hull_points) // 20
+                simplified_hull = []
+                for i in range(0, len(hull_points), step):
+                    simplified_hull.append(hull_points[i])
+                # Make sure we include the last point to close the shape properly
+                if hull_points[-1] not in simplified_hull:
+                    simplified_hull.append(hull_points[-1])
+                return simplified_hull
+            
+            return hull_points
+            
+        except Exception as e:
+            print(f"Error creating zone polygon for '{zone.name}': {e}")
+            return []
 
 
 class FieldImageSelector(QtWidgets.QWidget):
@@ -2066,6 +2835,10 @@ class ControlPanel(QtWidgets.QWidget):
         self.field_selector.imageSelected.connect(self.imageChangeRequested.emit)
         self.tab_widget.addTab(self.field_selector, "Field Images")
         
+        # Create analytics tab
+        analytics_tab = self._create_analytics_tab()
+        self.tab_widget.addTab(analytics_tab, "Analytics")
+        
         layout.addWidget(self.tab_widget)
 
     def _create_controls_tab(self):
@@ -2104,6 +2877,12 @@ class ControlPanel(QtWidgets.QWidget):
         self.chk_default_points = QtWidgets.QCheckBox("Show default points")
         self.chk_default_points.setChecked(True)
         gg.addWidget(self.chk_default_points, 2, 0, 1, 3)
+        
+        # Zone visibility controls
+        self.chk_show_zones = QtWidgets.QCheckBox("Show zones")
+        self.chk_show_zones.setChecked(True)
+        self.chk_show_zones.setToolTip("Toggle visibility of field zones")
+        gg.addWidget(self.chk_show_zones, 3, 0, 1, 3)
 
         layout.addWidget(grid_group)
 
@@ -2311,6 +3090,7 @@ class ControlPanel(QtWidgets.QWidget):
         self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
         self.chk_labels.toggled.connect(self.view.set_show_labels)
         self.chk_default_points.toggled.connect(self.view.set_show_default_points)
+        self.chk_show_zones.toggled.connect(self.view.set_show_zones)
         
         # Measurement controls
         self.chk_measurement_mode.toggled.connect(self._on_measurement_mode_toggled)
@@ -2349,6 +3129,152 @@ class ControlPanel(QtWidgets.QWidget):
         self.btn_line_remove.clicked.connect(self._on_line_remove)
 
         return controls_widget
+
+    def _create_analytics_tab(self):
+        """Create the analytics and reporting tab content"""
+        analytics_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(analytics_widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Path Planning section
+        path_group = QtWidgets.QGroupBox("Path Planning")
+        pg = QtWidgets.QGridLayout(path_group)
+        
+        # Path mode toggle
+        self.chk_path_mode = QtWidgets.QCheckBox("Path Planning Mode")
+        self.chk_path_mode.setToolTip("Enable to create robot paths by clicking waypoints")
+        pg.addWidget(self.chk_path_mode, 0, 0, 1, 3)
+        
+        # Robot dimensions
+        pg.addWidget(QtWidgets.QLabel("Robot Width (in):"), 1, 0)
+        self.spin_robot_width = QtWidgets.QDoubleSpinBox()
+        self.spin_robot_width.setRange(1.0, 36.0)
+        self.spin_robot_width.setValue(18.0)
+        self.spin_robot_width.setDecimals(1)
+        pg.addWidget(self.spin_robot_width, 1, 1)
+        
+        pg.addWidget(QtWidgets.QLabel("Robot Length (in):"), 2, 0)
+        self.spin_robot_length = QtWidgets.QDoubleSpinBox()
+        self.spin_robot_length.setRange(1.0, 36.0)
+        self.spin_robot_length.setValue(18.0)
+        self.spin_robot_length.setDecimals(1)
+        pg.addWidget(self.spin_robot_length, 2, 1)
+        
+        # Path controls
+        path_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_finish_path = QtWidgets.QPushButton("Finish Path")
+        self.btn_finish_path.setEnabled(False)
+        self.btn_clear_current_path = QtWidgets.QPushButton("Clear Current")
+        self.btn_clear_current_path.setEnabled(False)
+        self.btn_clear_all_paths = QtWidgets.QPushButton("Clear All Paths")
+        path_btn_layout.addWidget(self.btn_finish_path)
+        path_btn_layout.addWidget(self.btn_clear_current_path)
+        path_btn_layout.addWidget(self.btn_clear_all_paths)
+        pg.addLayout(path_btn_layout, 3, 0, 1, 3)
+        
+        # Path list
+        self.list_paths = QtWidgets.QListWidget()
+        self.list_paths.setMaximumHeight(100)
+        pg.addWidget(QtWidgets.QLabel("Saved Paths:"), 4, 0, 1, 3)
+        pg.addWidget(self.list_paths, 5, 0, 1, 3)
+        
+        # Export path data
+        self.btn_export_paths = QtWidgets.QPushButton("Export Path Data")
+        pg.addWidget(self.btn_export_paths, 6, 0, 1, 3)
+        
+        layout.addWidget(path_group)
+        
+        # Field Analysis section
+        analysis_group = QtWidgets.QGroupBox("Field Analysis")
+        ag = QtWidgets.QGridLayout(analysis_group)
+        
+        # Statistics display
+        self.lbl_total_points = QtWidgets.QLabel("Points: 0")
+        self.lbl_field_coverage = QtWidgets.QLabel("Coverage: 0%")
+        self.lbl_point_density = QtWidgets.QLabel("Density: 0.000000")
+        ag.addWidget(self.lbl_total_points, 0, 0)
+        ag.addWidget(self.lbl_field_coverage, 0, 1)
+        ag.addWidget(self.lbl_point_density, 1, 0, 1, 2)
+        
+        # Analysis controls
+        analysis_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_calculate_stats = QtWidgets.QPushButton("Calculate Statistics")
+        self.btn_show_distance_matrix = QtWidgets.QPushButton("Distance Matrix")
+        analysis_btn_layout.addWidget(self.btn_calculate_stats)
+        analysis_btn_layout.addWidget(self.btn_show_distance_matrix)
+        ag.addLayout(analysis_btn_layout, 2, 0, 1, 2)
+        
+        layout.addWidget(analysis_group)
+        
+        # Measurement History section
+        history_group = QtWidgets.QGroupBox("Measurement History")
+        hg = QtWidgets.QGridLayout(history_group)
+        
+        # Session controls
+        session_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_save_session = QtWidgets.QPushButton("Save Session")
+        self.btn_clear_history = QtWidgets.QPushButton("Clear History")
+        session_btn_layout.addWidget(self.btn_save_session)
+        session_btn_layout.addWidget(self.btn_clear_history)
+        hg.addLayout(session_btn_layout, 0, 0, 1, 2)
+        
+        # Session list
+        self.list_sessions = QtWidgets.QListWidget()
+        self.list_sessions.setMaximumHeight(80)
+        hg.addWidget(QtWidgets.QLabel("Saved Sessions:"), 1, 0, 1, 2)
+        hg.addWidget(self.list_sessions, 2, 0, 1, 2)
+        
+        layout.addWidget(history_group)
+        
+        # Export section
+        export_group = QtWidgets.QGroupBox("Data Export")
+        eg = QtWidgets.QGridLayout(export_group)
+        
+        # Export format selection
+        eg.addWidget(QtWidgets.QLabel("Format:"), 0, 0)
+        self.combo_export_format = QtWidgets.QComboBox()
+        self.combo_export_format.addItems(["CSV", "JSON"])
+        eg.addWidget(self.combo_export_format, 0, 1)
+        
+        # Export buttons
+        export_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_export_analytics = QtWidgets.QPushButton("Export Analytics Report")
+        self.btn_export_all_data = QtWidgets.QPushButton("Export All Data")
+        export_btn_layout.addWidget(self.btn_export_analytics)
+        export_btn_layout.addWidget(self.btn_export_all_data)
+        eg.addLayout(export_btn_layout, 1, 0, 1, 2)
+        
+        layout.addWidget(export_group)
+        
+        # Instructions
+        instructions_label = QtWidgets.QLabel(
+            "<b>Analytics & Reporting Instructions:</b><br>"
+            "• <b>Path Planning:</b> Enable mode and click to create waypoints. Right-click to finish path.<br>"
+            "• <b>Field Analysis:</b> Generate statistics about point distribution and field coverage.<br>"
+            "• <b>Measurement History:</b> Save measurement sessions for comparison and analysis.<br>"
+            "• <b>Data Export:</b> Export analytics reports and path data for external analysis."
+        )
+        instructions_label.setWordWrap(True)
+        instructions_label.setStyleSheet("color: #a0a0a0; font-size: 10px; padding: 10px; background-color: #2a2a2a; border-radius: 5px;")
+        layout.addWidget(instructions_label)
+        
+        # Connect signals
+        self.chk_path_mode.toggled.connect(self._on_path_mode_toggled)
+        self.spin_robot_width.valueChanged.connect(self._on_robot_dimensions_changed)
+        self.spin_robot_length.valueChanged.connect(self._on_robot_dimensions_changed)
+        self.btn_finish_path.clicked.connect(self._on_finish_path)
+        self.btn_clear_current_path.clicked.connect(self._on_clear_current_path)
+        self.btn_clear_all_paths.clicked.connect(self._on_clear_all_paths)
+        self.btn_export_paths.clicked.connect(self._on_export_paths)
+        self.btn_calculate_stats.clicked.connect(self._on_calculate_stats)
+        self.btn_show_distance_matrix.clicked.connect(self._on_show_distance_matrix)
+        self.btn_save_session.clicked.connect(self._on_save_session)
+        self.btn_clear_history.clicked.connect(self._on_clear_history)
+        self.btn_export_analytics.clicked.connect(self._on_export_analytics)
+        self.btn_export_all_data.clicked.connect(self._on_export_all_data)
+        
+        return analytics_widget
 
     def update_field_image_path(self, new_path: str):
         """Update the field selector with the new current image path"""
@@ -2964,6 +3890,275 @@ class ControlPanel(QtWidgets.QWidget):
                 self.view._rebuild_overlays()
                 self._refresh_points_list()
 
+    # === ANALYTICS TAB HANDLERS ===
+    
+    def _on_path_mode_toggled(self, enabled: bool):
+        """Handle path planning mode toggle"""
+        self.view.set_path_mode(enabled)
+        self.btn_finish_path.setEnabled(enabled)
+        self.btn_clear_current_path.setEnabled(enabled)
+        if enabled:
+            # Update robot dimensions when entering path mode
+            self._on_robot_dimensions_changed()
+    
+    def _on_robot_dimensions_changed(self):
+        """Handle robot dimension changes"""
+        width = self.spin_robot_width.value()
+        length = self.spin_robot_length.value()
+        self.view.set_robot_dimensions(width, length)
+    
+    def _on_finish_path(self):
+        """Finish the current path"""
+        if len(self.view.current_path) >= 2:
+            # Ask for path name
+            name, ok = QtWidgets.QInputDialog.getText(
+                self, "Path Name", "Enter name for this path:",
+                text=f"Path {len(self.view.robot_paths) + 1}"
+            )
+            if ok and name.strip():
+                path_data = self.view.finish_current_path(name.strip())
+                if path_data:
+                    self._update_paths_list()
+                    self._update_path_statistics()
+    
+    def _on_clear_current_path(self):
+        """Clear the current path being created"""
+        self.view.clear_current_path()
+    
+    def _on_clear_all_paths(self):
+        """Clear all saved paths"""
+        reply = QtWidgets.QMessageBox.question(
+            self, "Clear All Paths", "Are you sure you want to clear all saved paths?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.view.clear_all_paths()
+            self._update_paths_list()
+            self._update_path_statistics()
+    
+    def _on_export_paths(self):
+        """Export path data to file"""
+        if not self.view.robot_paths:
+            QtWidgets.QMessageBox.information(self, "No Paths", "No paths to export. Create some paths first.")
+            return
+        
+        format_type = self.combo_export_format.currentText().lower()
+        file_filter = "CSV files (*.csv)" if format_type == "csv" else "JSON files (*.json)"
+        default_name = f"robot_paths.{format_type}"
+        
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Path Data", default_name, file_filter
+        )
+        if path:
+            try:
+                self.view.export_path_data(path, format_type)
+                QtWidgets.QMessageBox.information(self, "Export Complete", f"Path data exported to {path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to export path data:\n{str(e)}")
+    
+    def _on_calculate_stats(self):
+        """Calculate and display field statistics"""
+        stats = self.view.calculate_field_statistics()
+        
+        # Update display labels
+        self.lbl_total_points.setText(f"Points: {stats.get('total_points', 0)}")
+        self.lbl_field_coverage.setText(f"Coverage: {stats.get('field_coverage', 0):.1f}%")
+        self.lbl_point_density.setText(f"Density: {stats.get('point_density', 0):.6f}")
+        
+        # Show detailed statistics in a dialog
+        self._show_statistics_dialog(stats)
+    
+    def _on_show_distance_matrix(self):
+        """Show distance matrix in a dialog"""
+        if len(self.view.points) < 2:
+            QtWidgets.QMessageBox.information(self, "Distance Matrix", "Need at least 2 points to calculate distance matrix.")
+            return
+        
+        matrix = self.view._calculate_distance_matrix()
+        self._show_distance_matrix_dialog(matrix)
+    
+    def _on_save_session(self):
+        """Save current measurement session"""
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "Session Name", "Enter name for this session:",
+            text=f"Session {len(self.view.measurement_history) + 1}"
+        )
+        if ok and name.strip():
+            session_data = self.view.save_measurement_session(name.strip())
+            self._update_sessions_list()
+            QtWidgets.QMessageBox.information(self, "Session Saved", f"Measurement session '{session_data['name']}' saved.")
+    
+    def _on_clear_history(self):
+        """Clear measurement history"""
+        reply = QtWidgets.QMessageBox.question(
+            self, "Clear History", "Are you sure you want to clear all measurement history?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.view.measurement_history.clear()
+            self._update_sessions_list()
+    
+    def _on_export_analytics(self):
+        """Export analytics report"""
+        format_type = self.combo_export_format.currentText().lower()
+        file_filter = "CSV files (*.csv)" if format_type == "csv" else "JSON files (*.json)"
+        default_name = f"analytics_report.{format_type}"
+        
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Analytics Report", default_name, file_filter
+        )
+        if path:
+            try:
+                self.view.export_analytics_report(path, format_type)
+                QtWidgets.QMessageBox.information(self, "Export Complete", f"Analytics report exported to {path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to export analytics:\n{str(e)}")
+    
+    def _on_export_all_data(self):
+        """Export all data (points, paths, measurements, analytics)"""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export All Data", "ftc_field_data.json", "JSON files (*.json)"
+        )
+        if path:
+            try:
+                import json
+                from datetime import datetime
+                
+                # Compile all data
+                all_data = {
+                    "export_info": {
+                        "timestamp": datetime.now().isoformat(),
+                        "field_image": getattr(self.view, 'current_image_path', ''),
+                        "application_version": "1.3.2"
+                    },
+                    "points": self.view.points,
+                    "vectors": self.view.vectors,
+                    "lines": self.view.lines,
+                    "robot_paths": self.view.robot_paths,
+                    "measurement_history": self.view.measurement_history,
+                    "field_statistics": self.view.calculate_field_statistics(),
+                    "robot_dimensions": {
+                        "width": self.view.robot_width,
+                        "length": self.view.robot_length
+                    }
+                }
+                
+                with open(path, 'w') as f:
+                    json.dump(all_data, f, indent=2)
+                
+                QtWidgets.QMessageBox.information(self, "Export Complete", f"All data exported to {path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Export Error", f"Failed to export all data:\n{str(e)}")
+    
+    def _update_paths_list(self):
+        """Update the paths list widget"""
+        self.list_paths.clear()
+        for path_data in self.view.robot_paths:
+            item_text = f"{path_data['name']} ({len(path_data['points'])} pts, {path_data['total_distance']:.1f} in)"
+            self.list_paths.addItem(item_text)
+    
+    def _update_sessions_list(self):
+        """Update the sessions list widget"""
+        self.list_sessions.clear()
+        for session in self.view.measurement_history:
+            item_text = f"{session['name']} ({session['timestamp']})"
+            self.list_sessions.addItem(item_text)
+    
+    def _update_path_statistics(self):
+        """Update path-related statistics display"""
+        if hasattr(self, 'view') and self.view.robot_paths:
+            # Could add path-specific statistics here
+            pass
+    
+    def _show_statistics_dialog(self, stats: dict):
+        """Show detailed statistics in a dialog"""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Field Statistics")
+        dialog.setModal(True)
+        dialog.resize(500, 400)
+        
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        # Create text widget for statistics
+        text_widget = QtWidgets.QTextEdit()
+        text_widget.setReadOnly(True)
+        
+        # Format statistics
+        stats_text = "<h3>Field Statistics Report</h3><br>"
+        stats_text += f"<b>Total Points:</b> {stats.get('total_points', 0)}<br>"
+        stats_text += f"<b>Field Coverage:</b> {stats.get('field_coverage', 0):.1f}%<br>"
+        stats_text += f"<b>Point Density:</b> {stats.get('point_density', 0):.6f} points/sq_in<br><br>"
+        
+        if 'centroid' in stats:
+            centroid = stats['centroid']
+            stats_text += f"<b>Centroid:</b> ({centroid['x']:.2f}, {centroid['y']:.2f}) inches<br><br>"
+        
+        if 'x_range' in stats and 'y_range' in stats:
+            x_range = stats['x_range']
+            y_range = stats['y_range']
+            stats_text += "<b>Coordinate Ranges:</b><br>"
+            stats_text += f"X: {x_range['min']:.2f} to {x_range['max']:.2f} inches (span: {x_range['span']:.2f})<br>"
+            stats_text += f"Y: {y_range['min']:.2f} to {y_range['max']:.2f} inches (span: {y_range['span']:.2f})<br><br>"
+        
+        if 'path_statistics' in stats:
+            path_stats = stats['path_statistics']
+            stats_text += "<b>Path Statistics:</b><br>"
+            stats_text += f"Total Paths: {path_stats.get('total_paths', 0)}<br>"
+            stats_text += f"Total Distance: {path_stats.get('total_path_distance', 0):.2f} inches<br>"
+            stats_text += f"Average Path Length: {path_stats.get('average_path_length', 0):.2f} inches<br>"
+            stats_text += f"Total Waypoints: {path_stats.get('total_waypoints', 0)}<br>"
+        
+        text_widget.setHtml(stats_text)
+        layout.addWidget(text_widget)
+        
+        # Close button
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
+    
+    def _show_distance_matrix_dialog(self, matrix: list):
+        """Show distance matrix in a dialog"""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Distance Matrix")
+        dialog.setModal(True)
+        dialog.resize(600, 500)
+        
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        # Create table widget
+        table = QtWidgets.QTableWidget()
+        num_points = len(matrix)
+        table.setRowCount(num_points)
+        table.setColumnCount(num_points)
+        
+        # Set headers
+        headers = [f"P{i+1}" for i in range(num_points)]
+        table.setHorizontalHeaderLabels(headers)
+        table.setVerticalHeaderLabels(headers)
+        
+        # Fill table with distances
+        for i in range(num_points):
+            for j in range(num_points):
+                item = QtWidgets.QTableWidgetItem(f"{matrix[i][j]:.2f}")
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                if i == j:
+                    item.setBackground(QtGui.QColor(100, 100, 100))
+                table.setItem(i, j, item)
+        
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+        
+        # Close button
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, image_path: str):
@@ -2996,10 +4191,40 @@ class MainWindow(QtWidgets.QMainWindow):
         # Auto-resize the image for consistent coordinate system
         pixmap = self._auto_resize_field_image(original_pixmap)
 
-        # Scene + View
-        scene = QtWidgets.QGraphicsScene(self)
-        self.view = FieldView(scene, pixmap, image_path)
-        self.setCentralWidget(self.view)
+        # Create separate scenes for viewer and editor to avoid shared zone items
+        viewer_scene = QtWidgets.QGraphicsScene(self)
+        self.view = FieldView(viewer_scene, pixmap, image_path)
+        
+        # Create main tab widget for View Mode vs Edit Mode
+        self.main_tab_widget = QtWidgets.QTabWidget()
+        self.main_tab_widget.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        
+        # Create Field Viewer tab (existing functionality)
+        viewer_widget = QtWidgets.QWidget()
+        viewer_layout = QtWidgets.QHBoxLayout(viewer_widget)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.addWidget(self.view)
+        
+        self.main_tab_widget.addTab(viewer_widget, "Field Viewer")
+        
+        # Create Field Editor tab (if field editor is available)
+        if FieldEditorPanel is not None:
+            editor_widget = QtWidgets.QWidget()
+            editor_layout = QtWidgets.QHBoxLayout(editor_widget)
+            editor_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Create a separate scene for the editor to avoid shared zone items
+            editor_scene = QtWidgets.QGraphicsScene(self)
+            self.editor_view = FieldView(editor_scene, pixmap, image_path)
+            self.editor_view.setEnabled(False)  # Disable interaction initially
+            editor_layout.addWidget(self.editor_view)
+            
+            self.main_tab_widget.addTab(editor_widget, "Field Editor")
+            
+            # Connect tab change to handle mode switching
+            self.main_tab_widget.currentChanged.connect(self._on_mode_changed)
+        
+        self.setCentralWidget(self.main_tab_widget)
         
         # Create toolbar first
         self._create_toolbar()
@@ -3007,30 +4232,40 @@ class MainWindow(QtWidgets.QMainWindow):
         # Controls (dock on right) - wrapped in scroll area
         self.panel = ControlPanel(self.view, self.current_image_path)
         
+        # Create field editor panel if available
+        if FieldEditorPanel is not None:
+            self.field_editor_panel = FieldEditorPanel()
+            self.field_editor_panel.configurationChanged.connect(self._on_field_config_changed)
+            self.field_editor_panel.imageChangeRequested.connect(self._on_image_change_requested)
+            self.field_editor_panel.zoneVisibilityChanged.connect(self._on_editor_zone_visibility_changed)
+        else:
+            self.field_editor_panel = None
+        
         # Connect image change signal
         self.panel.imageChangeRequested.connect(self._on_image_change_requested)
         
         # Create tab widget for controls and instructions
-        tab_widget = QtWidgets.QTabWidget()
+        self.control_tab_widget = QtWidgets.QTabWidget()
         
-        # Add controls tab
-        controls_scroll = QtWidgets.QScrollArea()
-        controls_scroll.setWidget(self.panel)
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        controls_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        tab_widget.addTab(controls_scroll, "Controls")
+        # Create stacked widget to switch between control panels
+        self.control_stack = QtWidgets.QStackedWidget()
+        self.control_stack.addWidget(self.panel)  # Index 0: Viewer controls
+        if self.field_editor_panel is not None:
+            self.control_stack.addWidget(self.field_editor_panel)  # Index 1: Editor controls
+        
+        # Add controls tab with stacked widget
+        self.control_tab_widget.addTab(self.control_stack, "Controls")
         
         # Add instructions tab
         instructions_widget = self._create_instructions_widget()
         instructions_scroll = QtWidgets.QScrollArea()
         instructions_scroll.setWidget(instructions_widget)
         instructions_scroll.setWidgetResizable(True)
-        tab_widget.addTab(instructions_scroll, "Help & Instructions")
+        self.control_tab_widget.addTab(instructions_scroll, "Help & Instructions")
         
         # Create scroll area for the tab widget
         scroll_area = QtWidgets.QScrollArea()
-        scroll_area.setWidget(tab_widget)
+        scroll_area.setWidget(self.control_tab_widget)
         scroll_area.setWidgetResizable(True)
         scroll_area.setMinimumWidth(350)  # Ensure minimum width for tabs
         
@@ -3057,6 +4292,74 @@ class MainWindow(QtWidgets.QMainWindow):
         # Menu actions
         self._build_menu()
     
+    def _on_mode_changed(self, index: int):
+        """Handle switching between View Mode and Edit Mode"""
+        if index == 0:  # Field Viewer mode
+            # Switch controls to viewer panel
+            self.control_stack.setCurrentIndex(0)
+            # Enable viewer interactions
+            self.view.setEnabled(True)
+            if hasattr(self, 'editor_view'):
+                self.editor_view.setEnabled(False)
+        elif index == 1 and self.field_editor_panel is not None:  # Field Editor mode
+            # Switch controls to editor panel
+            self.control_stack.setCurrentIndex(1)
+            # Enable editor interactions
+            if hasattr(self, 'editor_view'):
+                self.editor_view.setEnabled(True)
+            self.view.setEnabled(False)
+            
+            # Auto-load current field config if none loaded
+            if hasattr(self.field_editor_panel, 'current_config') and not self.field_editor_panel.current_config.points:
+                # Use a small delay to ensure the editor is fully initialized
+                QtCore.QTimer.singleShot(200, self._auto_load_matching_config)
+    
+    def _on_field_config_changed(self):
+        """Handle field configuration changes from the editor"""
+        if hasattr(self, 'field_editor_panel') and self.field_editor_panel:
+            config = self.field_editor_panel.get_field_configuration()
+            
+            # Update both views with new configuration
+            self.view.update_field_configuration(config)
+            if hasattr(self, 'editor_view'):
+                self.editor_view.update_field_configuration(config)
+            
+            # Force a complete refresh of the views with proper timing
+            QtCore.QTimer.singleShot(50, self._force_view_refresh)
+    
+    def _on_editor_zone_visibility_changed(self, visible: bool):
+        """Handle zone visibility changes from the field editor"""
+        if hasattr(self, 'editor_view'):
+            self.editor_view.set_show_zones(visible)
+    
+    def _force_view_refresh(self):
+        """Force a complete refresh of both field views"""
+        self.view._rebuild_overlays()
+        if hasattr(self, 'editor_view'):
+            self.editor_view._rebuild_overlays()
+    
+    def _auto_load_matching_config(self):
+        """Auto-load field config that matches current image"""
+        if not hasattr(self, 'field_editor_panel') or self.field_editor_panel is None:
+            return
+            
+        try:
+            current_image_name = os.path.basename(self.current_image_path)
+            config_name = os.path.splitext(current_image_name)[0] + ".json"
+            
+            script_dir = os.path.dirname(__file__)
+            config_path = os.path.join(script_dir, "Field Configs", config_name)
+            
+            if os.path.exists(config_path):
+                # Find the config in the list and load it
+                for i in range(self.field_editor_panel.config_list.count()):
+                    item = self.field_editor_panel.config_list.item(i)
+                    if item and item.data(QtCore.Qt.ItemDataRole.UserRole) == config_path:
+                        self.field_editor_panel._load_config_from_item(item)
+                        break
+        except Exception as e:
+            print(f"Auto-load config failed: {e}")
+    
     def _on_image_change_requested(self, new_image_path: str):
         """Handle requests to change the field image"""
         try:
@@ -3072,16 +4375,30 @@ class MainWindow(QtWidgets.QMainWindow):
             # Auto-resize image to maintain field coordinate system consistency
             pixmap = self._auto_resize_field_image(original_pixmap)
             
-            # Update the image in the view
+            # Update the image in both views
             self.view.image_item.setPixmap(pixmap)
             self.view.image_rect = self.view.image_item.boundingRect()
             self.view.setSceneRect(self.view.image_rect)
             
-            # Reload default points for the new field
-            self.view.reload_default_points_for_image(new_image_path)
+            if hasattr(self, 'editor_view') and self.editor_view:
+                self.editor_view.image_item.setPixmap(pixmap)
+                self.editor_view.image_rect = self.editor_view.image_item.boundingRect()
+                self.editor_view.setSceneRect(self.editor_view.image_rect)
             
-            # Rebuild overlays after points are loaded
-            self.view._rebuild_overlays()
+            # Check if this change is coming from field editor
+            is_from_field_editor = (hasattr(self, 'field_editor_panel') and 
+                                   self.field_editor_panel and 
+                                   self.main_tab_widget.currentIndex() == 1)
+            
+            if not is_from_field_editor:
+                # Normal image change - reload default points from file
+                self.view.reload_default_points_for_image(new_image_path)
+                # Rebuild overlays after points are loaded
+                self.view._rebuild_overlays()
+            else:
+                # Image change from field editor - don't reload default points, 
+                # let the field configuration handle it
+                pass
             
             # Update current image path
             self.current_image_path = new_image_path
@@ -3093,7 +4410,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_view()
             
             # Update the field selector to reflect the new current image
-            self.panel.update_field_image_path(new_image_path)
+            if hasattr(self.panel, 'update_field_image_path'):
+                self.panel.update_field_image_path(new_image_path)
             
             # Add to recent files
             self._add_recent_file(new_image_path)
@@ -3388,7 +4706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addAction(grid_action)
         
         measurement_action = QtGui.QAction("Measure", self)
-        measurement_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        measurement_action.setIcon(self._create_ruler_icon(16))
         measurement_action.setCheckable(True)
         measurement_action.setShortcut(QtGui.QKeySequence("Ctrl+M"))
         measurement_action.setToolTip("Toggle measurement mode (Ctrl+M)")
@@ -3880,6 +5198,38 @@ class MainWindow(QtWidgets.QMainWindow):
         
         return QtGui.QIcon(pixmap)
 
+    def _create_ruler_icon(self, size: int = 16) -> QtGui.QIcon:
+        """Create a ruler icon for measurement tools"""
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        
+        # Set pen for drawing the ruler
+        pen = QtGui.QPen(QtGui.QColor("#2c3e50"), 1.5)
+        painter.setPen(pen)
+        
+        # Draw ruler body (horizontal line)
+        ruler_y = size // 2
+        painter.drawLine(2, ruler_y, size - 2, ruler_y)
+        
+        # Draw measurement marks
+        for i in range(3):
+            x = 3 + i * (size - 6) // 2
+            if i == 1:  # Middle mark is longer
+                painter.drawLine(x, ruler_y - 3, x, ruler_y + 3)
+            else:  # End marks are shorter
+                painter.drawLine(x, ruler_y - 2, x, ruler_y + 2)
+        
+        # Draw small tick marks
+        for i in range(5):
+            x = 2 + i * (size - 4) // 4
+            painter.drawLine(x, ruler_y - 1, x, ruler_y + 1)
+        
+        painter.end()
+        return QtGui.QIcon(pixmap)
+
     def _create_instructions_widget(self) -> QtWidgets.QWidget:
         """Create the comprehensive instructions widget for the help tab"""
         widget = QtWidgets.QWidget()
@@ -4011,6 +5361,36 @@ class MainWindow(QtWidgets.QMainWindow):
         a_text.setWordWrap(True)
         a_layout.addWidget(a_text)
         layout.addWidget(advanced)
+        
+        # Analytics & Reporting section
+        analytics = QtWidgets.QGroupBox("Analytics & Reporting")
+        an_layout = QtWidgets.QVBoxLayout(analytics)
+        an_text = QtWidgets.QLabel(
+            "Path Planning:\n"
+            "• Enable Path Planning Mode in Analytics tab\n"
+            "• Click waypoints to create robot paths\n"
+            "• Right-click to finish current path\n"
+            "• Set robot dimensions for accurate planning\n"
+            "• Export paths to CSV/JSON for robot code\n\n"
+            "Field Analysis:\n"
+            "• Calculate comprehensive field statistics\n"
+            "• View point distribution and coverage analysis\n"
+            "• Generate distance matrices between all points\n"
+            "• Track field density and coordinate ranges\n\n"
+            "Measurement History:\n"
+            "• Save measurement sessions for comparison\n"
+            "• Export measurement data to CSV/Excel\n"
+            "• Track measurement trends over time\n"
+            "• Compare different field configurations\n\n"
+            "Data Export Options:\n"
+            "• Analytics reports (CSV/JSON formats)\n"
+            "• Complete field data backup\n"
+            "• Robot path data for programming\n"
+            "• Custom measurement datasets"
+        )
+        an_text.setWordWrap(True)
+        an_layout.addWidget(an_text)
+        layout.addWidget(analytics)
         
         # Tips section
         tips = QtWidgets.QGroupBox("Pro Tips")
